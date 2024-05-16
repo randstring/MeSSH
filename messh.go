@@ -71,6 +71,8 @@ type stats struct {
 	err		int
 	total	int
 	avg		time.Duration
+	min		time.Duration
+	max		time.Duration
 	time	time.Duration
 }
 
@@ -180,6 +182,18 @@ func header () {
 	pterm.DefaultSection.Println("Running command ...")
 }
 
+func summary (results []result, stats stats) {
+	pterm.DefaultSection.Println("Session summary")
+	pterm.Println(pterm.Yellow("* Date                  :"), pterm.Cyan(time.Now()))
+	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(time.Now().Sub(global.start)))
+	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(stats.avg))
+	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(stats.min))
+	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(stats.min))
+	pterm.Println(pterm.Yellow("* Total results         :"), pterm.Cyan(len(results)))
+	pterm.Println(pterm.Yellow("* Successful            :"), pterm.Cyan(stats.ok))
+	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(stats.err))
+}
+
 func filterOne (res result, stats stats) bool {
 	val, _, _ := global.filterCEL.Eval(res.as_map)
 	return val == types.True
@@ -194,11 +208,15 @@ func filterResults (results []result, stats stats) (filtered []result) {
 	return
 }
 
-func summary (results []result, stats stats) {
-
+func sortResults (results []result) {
+	sortCEL := getCEL(global.config.Sort)
+	sort.Slice(results, func(i, j int) bool {
+		val, _, _ := sortCEL.Eval(*results[i].as_map)
+		return val == types.True
+	})
 }
 
-func sortResults (results []result, field string) []result {
+func sortR (results []result, field string) []result {
 	//sorter := getCEL(global.config.Sort)
 	sort.Slice(results, func(i, j int) bool {
 		switch field {
@@ -352,10 +370,17 @@ func getStats (results []result) stats {
 		} else {
 			stats.err++
 		}
+		if res.Time < stats.min {
+			stats.min = res.Time
+		} else if res.Time > stats.max {
+			stats.max = res.Time
+		}
 		spent += res.Time
 	}
 	stats.total = stats.ok + stats.err
-	stats.avg = spent / time.Duration(len(results))
+	if len(results) > 0 {
+		stats.avg = spent / time.Duration(len(results))
+	}
 	stats.time = time.Now().Sub(global.start)
 	return stats
 }
@@ -425,18 +450,19 @@ func messh () {
 	global.pool = gpool.NewPool(global.config.Parallelism)
 
 	results := dial(nil, list)
+	global.pool.Stop()
+
 	stats := getStats(results)
 	results = filterResults(results, stats)
 // save(results) // sqlite
-// results = sort(results)
+// 	sortResults(results)
 // output(results, stats) // file(s)
 // display(results, stats)
 /*	for _, res = range results {
 		printRes(res)
 	}
 */
-// summary(results)
-	global.pool.Stop()
+	summary(results, stats)
 }
 
 func main () {
@@ -448,7 +474,6 @@ func main () {
 	global.outputCEL = getCEL(global.config.Template)
 	global.filterCEL = getCEL(global.config.Filter)
 
-// header()
 	go kbd()
 	messh()
 }
