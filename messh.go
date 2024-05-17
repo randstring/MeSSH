@@ -4,7 +4,6 @@ import (
 	"strings"
 	"os"
 	"fmt"
-	"net"
 	"time"
 	"sort"
 	"strconv"
@@ -14,7 +13,7 @@ import (
 	"github.com/sherifabdlnaby/gpool"
 _	"github.com/davecgh/go-spew/spew"
 	"github.com/melbahja/goph"
-	"golang.org/x/crypto/ssh"
+_	"golang.org/x/crypto/ssh"
 
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
@@ -47,12 +46,6 @@ type job struct {
 	upload		*Transfer
 }
 
-type jump struct {
-	host host
-	job job
-	jump []jump
-}
-
 type result struct {
 	Host		string
 //	exit		int
@@ -79,6 +72,7 @@ type stats struct {
 var global struct {
 	config		Config
 	hosts		[]host
+	results		[]result
 	start		time.Time
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
@@ -186,6 +180,7 @@ func summary (results []result, stats stats) {
 	pterm.DefaultSection.Println("Session summary")
 	pterm.Println(pterm.Yellow("* Date                  :"), pterm.Cyan(time.Now()))
 	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(time.Now().Sub(global.start)))
+	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(stats.time))
 	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(stats.avg))
 	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(stats.min))
 	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(stats.min))
@@ -195,7 +190,10 @@ func summary (results []result, stats stats) {
 }
 
 func filterOne (res result, stats stats) bool {
-	val, _, _ := global.filterCEL.Eval(res.as_map)
+	val, _, err := global.filterCEL.Eval(*res.as_map)
+	if err != nil {
+		panic(err)
+	}
 	return val == types.True
 }
 
@@ -291,41 +289,17 @@ func getAuth () func () goph.Auth {
 	}
 }
 
-func getSSH (conn *ssh.Client, host host) (*goph.Client, error) {
+func execute (host host, job job) (result) {
+	start := time.Now()
+	res := result{Host: host.addr}
+
 	auth := getAuth()()
 	cb, _ := goph.DefaultKnownHosts()
-	if conn == nil {
-		gophssh, err := goph.NewConn(&goph.Config{Auth: auth, User: host.user, Addr: host.addr, Port: uint(host.port), Callback: cb})
-		if err != nil {
-			fmt.Println(err)
-			return nil, err
-	    }
-		conn = gophssh.Client
-	} else {
-		addr := net.JoinHostPort(host.addr, fmt.Sprint(host.port))
-		nc, err := conn.Dial("tcp", addr)
-		if err != nil {
-			panic(err)
-		}
-		ncc, chans, reqs, err := ssh.NewClientConn(nc, addr, &ssh.ClientConfig{Auth: auth, User: host.user, HostKeyCallback: cb})
-		if err != nil {
-			panic(err)
-		}
-		conn = ssh.NewClient(ncc, chans, reqs)
-	}
-	var gophssh = goph.Client{Client: conn}
-
-	return &gophssh, nil
-}
-
-func execute (conn *ssh.Client, host host, job job) (*ssh.Client, result) {
-	res := result{Host: host.addr}
-	start := time.Now()
-	gophssh, err := getSSH(conn, host)
+	ssh, err := goph.NewConn(&goph.Config{Auth: auth, User: host.user, Addr: host.addr, Port: uint(host.port), Callback: cb})
 	if err != nil {
-		return nil, res
+		fmt.Println(err)
+		return res
 	}
-	ssh := *gophssh
 
 	// any uploads go first
 	if job.upload != nil {
@@ -358,7 +332,7 @@ func execute (conn *ssh.Client, host host, job job) (*ssh.Client, result) {
 		panic(err)
 	}
 
-	return ssh.Client, res
+	return res
 }
 
 func getStats (results []result) stats {
@@ -385,19 +359,21 @@ func getStats (results []result) stats {
 	return stats
 }
 
-func dial (conn *ssh.Client, hosts []jump) []result {
+func dial (job job) []result {
 	var results []result
-	for _, host := range hosts {
+	global.pool = gpool.NewPool(global.config.Parallelism)
+	for _, host := range global.hosts {
 		host := host
 		global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
-			conn, result := execute(conn, host.host, host.job)
+			result := execute(host, job)
 			output(result)
-			results = append(results, dial(conn, host.jump)...)
 			results = append(results, result)
 			render(result, results)
 		})
 	}
+	global.pool.Stop()
+
 	return results
 }
 
@@ -438,20 +414,16 @@ func kbd () {
 }
 
 func messh () {
-	var list []jump
-// prepare hosts
-	for _, host := range global.hosts {
-		list = append(list, jump{host: host, job: job{cmd: append([]string{global.config.Command}, global.config.Args...)}})
-	}
 	header()
+//	hosts := prepareHosts()
 //	os.Exit(0)
 
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
-	global.pool = gpool.NewPool(global.config.Parallelism)
 
-	results := dial(nil, list)
-	global.pool.Stop()
+	results := dial(job{cmd: append([]string{global.config.Command}, global.config.Args...)})
+//	results = global.results
 
+fmt.Println(results)
 	stats := getStats(results)
 	results = filterResults(results, stats)
 // save(results) // sqlite
