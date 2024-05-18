@@ -92,7 +92,7 @@ type Config struct {
 	Upload		[]string		`arg:"-U" placeholder:"LOCAL [REMOTE]"`
 	Download	string			`arg:"-D" placeholder:"REMOTE [LOCAL]"`
 //	Sort		[]string		`arg:"-s"`
-	Sort		string
+	Sort		string			`arg:"-s"`
 	Command		string			`arg:"positional" help:"Command to run"`
 	Args		[]string		`arg:"positional" help:"Any command line arguments"`
 }
@@ -224,9 +224,16 @@ func filterResults (results []result, stats stats) (filtered []result) {
 }
 
 func sortResults (results []result) {
-	sortCEL := getCEL(global.config.Sort, nil)
+	celenv, _ := cel.NewEnv(
+		cel.Variable("a", cel.MapType(cel.StringType, cel.AnyType)),
+		cel.Variable("b", cel.MapType(cel.StringType, cel.AnyType)),
+	)
+	sortCEL := getCEL(global.config.Sort, celenv)
 	sort.Slice(results, func(i, j int) bool {
-		val, _, _ := sortCEL.Eval(*results[i].as_map)
+		sortmap := make(map[string]any)
+		sortmap["a"] = *results[i].as_map
+		sortmap["b"] = *results[j].as_map
+		val, _, _ := sortCEL.Eval(sortmap)
 		return val == types.True
 	})
 }
@@ -444,7 +451,7 @@ fmt.Println(results)
 	stats := getStats(results)
 	results = filterResults(results, stats)
 // save(results) // sqlite
-// 	sortResults(results)
+	sortResults(results)
 // output(results, stats) // file(s)
 // display(results, stats)
 /*	for _, res = range results {
