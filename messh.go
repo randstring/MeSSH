@@ -24,6 +24,7 @@ _	"golang.org/x/crypto/ssh"
 
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/ext"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -91,7 +92,6 @@ type Config struct {
 	Group		[]string		`arg:"-g" placeholder:"FIELD|LABEL..." help:"Group connections by the specified fields or labels"`
 	Upload		[]string		`arg:"-U" placeholder:"LOCAL [REMOTE]"`
 	Download	string			`arg:"-D" placeholder:"REMOTE [LOCAL]"`
-//	Sort		[]string		`arg:"-s"`
 	Sort		string			`arg:"-s"`
 	Command		string			`arg:"positional" help:"Command to run"`
 	Args		[]string		`arg:"positional" help:"Any command line arguments"`
@@ -104,6 +104,8 @@ func (Config) Version() string {
 func getCEL(expr string, env *cel.Env) cel.Program {
 	if env == nil {
 		newenv, err := cel.NewEnv(
+			ext.Math(),
+			ext.Strings(),
 			cel.Variable("Host",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
 			cel.Variable("Tag",			cel.StringType),
