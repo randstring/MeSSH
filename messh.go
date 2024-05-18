@@ -110,10 +110,13 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("Out",			cel.StringType),
 			cel.Variable("Tag",			cel.StringType),
 			cel.Variable("Time",		types.DurationType),
-			cel.Variable("CommandErr",	cel.StringType),
-			cel.Variable("UploadErr",	cel.StringType),
-			cel.Variable("DownloadErr",	cel.StringType),
+			cel.Variable("Cmd",			cel.StringType),
+			cel.Variable("Upload",		cel.StringType),
+			cel.Variable("Download",	cel.StringType),
 			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Host32",		cel.StringType),
+			cel.Variable("Arrow",		cel.StringType),
+			cel.Variable("Status",		cel.StringType),
 		)
 		if err != nil {
 			panic(err)
@@ -263,23 +266,25 @@ func resultExtras (res *result) {
 	
 }
 
-func output (res result) {
+func printRes (res result) {
 	if global.config.Template == "" {
 		return
 	}
-	fields := map[string]interface{}{
-		"host":		fmt.Sprintf("%32s", res.Host),
-		"time":		res.Time.String(),
-		"out":		strings.TrimSuffix(res.Out, "\n"),
-		"status":	"OK",
-		"tag":		color.GreenString("->"),
+	
+	extra := map[string]interface{}{
+		"Host32":	fmt.Sprintf("%32s", res.Host),
+		"Status":	"OK",
+		"Arrow"	:	color.GreenString("->"),
 	}
 	if res.Cmd != nil {
-		fields["status"] = "ERR"
-		fields["tag"] = color.RedString("=:")
+		extra["Status"] = "ERR"
+		extra["Arrow"] = color.RedString("=:")
 	}
-//	pterm.Println(fasttemplate.New(global.config.Template, "{", "}").ExecuteString(fields))
-	wut, _, err := global.outputCEL.Eval(*res.as_map)
+	for k, v := range *res.as_map {
+		extra[k] = v
+	}
+
+	wut, _, err := global.outputCEL.Eval(extra)
 	if err != nil {
 		panic(err)
 	}
@@ -393,7 +398,9 @@ func dial (job job) []result {
 		global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
 			result := execute(host, job)
-			output(result)
+			if global.config.Immediate {
+				printRes(result)
+			}
 			results = append(results, result)
 			render(result, results)
 		})
@@ -455,11 +462,11 @@ fmt.Println(results)
 // save(results) // sqlite
 	sortResults(results)
 // output(results, stats) // file(s)
-// display(results, stats)
-/*	for _, res = range results {
-		printRes(res)
+	if ! global.config.Immediate {
+		for _, res := range results {
+			printRes(res)
+		}
 	}
-*/
 	summary(results, stats)
 }
 
