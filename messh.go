@@ -243,29 +243,6 @@ func sortResults (results []result) {
 	})
 }
 
-func sortR (results []result, field string) []result {
-	//sorter := getCEL(global.config.Sort, nil)
-	sort.Slice(results, func(i, j int) bool {
-		switch field {
-		case "time":
-			return results[i].Time > results[j].Time
-		case "host":
-			return results[i].Host > results[j].Host
-/*
-		case "status":
-			return results[i].status > results[j].status
-*/
-		default:
-			return false
-		}
-	})
-	return results
-}
-
-func resultExtras (res *result) {
-	
-}
-
 func printRes (res result) {
 	if global.config.Template == "" {
 		return
@@ -289,11 +266,6 @@ func printRes (res result) {
 		panic(err)
 	}
 	pterm.Println(wut.ConvertToType(cel.StringType))
-}
-
-func outp (res result) {
-	wut, _, _ := global.outputCEL.Eval(res.as_map)
-	wut.ConvertToType(cel.StringType)
 }
 
 func render (res result, results []result) {
@@ -448,15 +420,9 @@ func kbd () {
 
 func messh () {
 	header()
-//	hosts := prepareHosts()
-//	os.Exit(0)
-
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
 
 	results := dial(job{cmd: append([]string{global.config.Command}, global.config.Args...)})
-//	results = global.results
-
-fmt.Println(results)
 	stats := getStats(results)
 	results = filterResults(results, stats)
 // save(results) // sqlite
