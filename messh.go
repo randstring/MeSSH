@@ -98,7 +98,7 @@ type Config struct {
 }
 
 func (Config) Version() string {
-	return "MeSSH 0.3.0"
+	return "MeSSH 0.4.0"
 }
 
 func getCEL(expr string, env *cel.Env) cel.Program {
@@ -270,6 +270,9 @@ func printRes (res result) {
 
 func render (res result, results []result) {
 	stats := getStats(results)
+	if global.config.Immediate {
+		printRes(res)
+	}
 	global.progress.UpdateTitle(fmt.Sprintf("%d/%d conns, %d OK, %d ERR, %s avg",
 					global.pool.GetCurrent(), global.pool.GetSize(), stats.Ok, stats.Err, stats.Avg))
 	global.progress.Increment()
@@ -370,9 +373,6 @@ func dial (job job) []result {
 		global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
 			result := execute(host, job)
-			if global.config.Immediate {
-				printRes(result)
-			}
 			results = append(results, result)
 			render(result, results)
 		})
