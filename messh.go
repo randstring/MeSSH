@@ -60,13 +60,13 @@ type result struct {
 }
 
 type stats struct {
-	ok		int
-	err		int
-	total	int
-	avg		time.Duration
-	min		time.Duration
-	max		time.Duration
-	time	time.Duration
+	Ok		int
+	Err		int
+	Total	int
+	Avg		time.Duration
+	Min		time.Duration
+	Max		time.Duration
+	Time	time.Duration
 }
 
 var global struct {
@@ -187,17 +187,27 @@ func summary (results []result, stats stats) {
 	pterm.DefaultSection.Println("Session summary")
 	pterm.Println(pterm.Yellow("* Date                  :"), pterm.Cyan(time.Now()))
 	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(time.Now().Sub(global.start)))
-	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(stats.time))
-	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(stats.avg))
-	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(stats.min))
-	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(stats.min))
+	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(stats.Time))
+	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(stats.Avg))
+	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(stats.Min))
+	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(stats.Min))
 	pterm.Println(pterm.Yellow("* Total results         :"), pterm.Cyan(len(results)))
-	pterm.Println(pterm.Yellow("* Successful            :"), pterm.Cyan(stats.ok))
-	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(stats.err))
+	pterm.Println(pterm.Yellow("* Successful            :"), pterm.Cyan(stats.Ok))
+	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(stats.Err))
 }
 
 func filterOne (res result, stats stats) bool {
-	val, _, err := global.filterCEL.Eval(*res.as_map)
+	filtmap := make(map[string]any)
+	if err := mapstructure.WeakDecode(res, &filtmap); err != nil {
+		panic(err)
+	}
+	statmap := make(map[string]any)
+	if err := mapstructure.WeakDecode(stats, &statmap); err != nil {
+		panic(err)
+	}
+	filtmap["Stats"] = statmap
+
+	val, _, err := global.filterCEL.Eval(filtmap)
 	if err != nil {
 		panic(err)
 	}
@@ -275,7 +285,7 @@ func outp (res result) {
 func render (res result, results []result) {
 	stats := getStats(results)
 	global.progress.UpdateTitle(fmt.Sprintf("%d/%d conns, %d OK, %d ERR, %s avg",
-					global.pool.GetCurrent(), global.pool.GetSize(), stats.ok, stats.err, stats.avg))
+					global.pool.GetCurrent(), global.pool.GetSize(), stats.Ok, stats.Err, stats.Avg))
 	global.progress.Increment()
 }
 
@@ -347,22 +357,22 @@ func getStats (results []result) stats {
 	var spent time.Duration
 	for _, res := range results {
 		if res.Cmd == nil {
-			stats.ok++
+			stats.Ok++
 		} else {
-			stats.err++
+			stats.Err++
 		}
-		if res.Time < stats.min {
-			stats.min = res.Time
-		} else if res.Time > stats.max {
-			stats.max = res.Time
+		if res.Time < stats.Min {
+			stats.Min = res.Time
+		} else if res.Time > stats.Max {
+			stats.Max = res.Time
 		}
 		spent += res.Time
 	}
-	stats.total = stats.ok + stats.err
+	stats.Total = stats.Ok + stats.Err
 	if len(results) > 0 {
-		stats.avg = spent / time.Duration(len(results))
+		stats.Avg = spent / time.Duration(len(results))
 	}
-	stats.time = time.Now().Sub(global.start)
+	stats.Time = time.Now().Sub(global.start)
 	return stats
 }
 
