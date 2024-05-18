@@ -101,15 +101,22 @@ func (Config) Version() string {
 	return "MeSSH 0.3.0"
 }
 
-func getCEL(expr string) cel.Program {
-	env, err := cel.NewEnv(
-		cel.Variable("Host", cel.StringType),
-		cel.Variable("Out", cel.StringType),
-		cel.Variable("Tag", cel.StringType),
-		cel.Variable("Time", types.DurationType),
-	)
-	if err != nil {
-		panic(err)
+func getCEL(expr string, env *cel.Env) cel.Program {
+	if env == nil {
+		newenv, err := cel.NewEnv(
+			cel.Variable("Host",		cel.StringType),
+			cel.Variable("Out",			cel.StringType),
+			cel.Variable("Tag",			cel.StringType),
+			cel.Variable("Time",		types.DurationType),
+			cel.Variable("CommandErr",	cel.StringType),
+			cel.Variable("UploadErr",	cel.StringType),
+			cel.Variable("DownloadErr",	cel.StringType),
+			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
+		)
+		if err != nil {
+			panic(err)
+		}
+		env = newenv
 	}
 	ast, issues := env.Compile(expr)
 	if issues != nil && issues.Err() != nil {
@@ -207,7 +214,7 @@ func filterResults (results []result, stats stats) (filtered []result) {
 }
 
 func sortResults (results []result) {
-	sortCEL := getCEL(global.config.Sort)
+	sortCEL := getCEL(global.config.Sort, nil)
 	sort.Slice(results, func(i, j int) bool {
 		val, _, _ := sortCEL.Eval(*results[i].as_map)
 		return val == types.True
@@ -215,7 +222,7 @@ func sortResults (results []result) {
 }
 
 func sortR (results []result, field string) []result {
-	//sorter := getCEL(global.config.Sort)
+	//sorter := getCEL(global.config.Sort, nil)
 	sort.Slice(results, func(i, j int) bool {
 		switch field {
 		case "time":
@@ -443,8 +450,8 @@ func main () {
 	arg.MustParse(&global.config)
 	global.hosts = parseHosts(global.config.Hosts)
 
-	global.outputCEL = getCEL(global.config.Template)
-	global.filterCEL = getCEL(global.config.Filter)
+	global.outputCEL = getCEL(global.config.Template, nil)
+	global.filterCEL = getCEL(global.config.Filter, nil)
 
 	go kbd()
 	messh()
