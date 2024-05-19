@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"context"
+	"path/filepath"
 	"github.com/fatih/color"
 //	"github.com/rivo/tview"
 	"github.com/sherifabdlnaby/gpool"
@@ -77,14 +78,15 @@ var global struct {
 	start		time.Time
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
-	outputCEL	cel.Program
+	formatCEL	cel.Program
 	filterCEL	cel.Program
 }
 
 type Config struct {
 	Parallelism int				`arg:"-p" default:"1" help:"max number of parallel connection"`
 	Hosts		string			`arg:"-f,required"`
-	Template	string			`arg:"-t" default:"{host} {tag} {out}" help:"Output template"`
+	Template	string			`arg:"-t" default:"{host} {tag} {out}" help:"Format template"`
+	Output		string			`arg:"-o" default:"{host} {tag} {out}" help:"Output template"`
 	Filter		string			`arg:"-F" help:"CEL expression to filter out unwanted entries"`
 	Immediate	bool			`arg:"-i" default:"true" help:"Print output immediately without waiting for all hosts to complete"`
 	Delay		time.Duration	`arg:"-d" default:"10ms" help:"Delay each new connection by specified time, to avoid congestion"`
@@ -108,7 +110,6 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			ext.Strings(),
 			cel.Variable("Host",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
-			cel.Variable("Tag",			cel.StringType),
 			cel.Variable("Time",		types.DurationType),
 			cel.Variable("Cmd",			cel.StringType),
 			cel.Variable("Upload",		cel.StringType),
@@ -243,11 +244,7 @@ func sortResults (results []result) {
 	})
 }
 
-func printRes (res result) {
-	if global.config.Template == "" {
-		return
-	}
-	
+func formatRes (res result, prg cel.Program) string {
 	extra := map[string]interface{}{
 		"Host32":	fmt.Sprintf("%32s", res.Host),
 		"Status":	"OK",
@@ -261,11 +258,23 @@ func printRes (res result) {
 		extra[k] = v
 	}
 
-	wut, _, err := global.outputCEL.Eval(extra)
+	wut, _, err := prg.Eval(extra)
 	if err != nil {
 		panic(err)
 	}
-	pterm.Println(wut.ConvertToType(cel.StringType))
+	line, _ := ext.FormatString(wut, "")
+	if err != nil {
+		panic(err)
+	}
+	return line
+}
+
+func printRes (res result) {
+	if global.config.Template == "" {
+		return
+	}
+
+	pterm.Println(formatRes(res, global.formatCEL))
 }
 
 func render (res result, results []result) {
@@ -382,6 +391,34 @@ func dial (job job) []result {
 	return results
 }
 
+func output (results []result) {
+	if global.config.Output == "" || global.config.Template == "" {
+		return
+	}
+	files := make(map[string][]string)
+	prog := getCEL(global.config.Output, nil)
+	for _, res := range results {
+		val, _, err := prog.Eval(*res.as_map)
+		if err != nil {
+			panic(err)
+		}
+		path, _ := ext.FormatString(val, "")
+		files[path] = append(files[path], formatRes(res, global.formatCEL))
+	}
+	for file, lines := range files {
+		dir := filepath.Dir(file)
+		err := os.MkdirAll(dir, 0750)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		err = os.WriteFile(file, []byte(strings.Join(lines, "\n")), 0660)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+}
+
 func kbd () {
 	if err := keyboard.Open(); err != nil {
 		panic(err)
@@ -427,6 +464,7 @@ func messh () {
 	results = filterResults(results, stats)
 // save(results) // sqlite
 	sortResults(results)
+	output(results)
 // output(results, stats) // file(s)
 	if ! global.config.Immediate {
 		for _, res := range results {
@@ -442,7 +480,7 @@ func main () {
 	arg.MustParse(&global.config)
 	global.hosts = parseHosts(global.config.Hosts)
 
-	global.outputCEL = getCEL(global.config.Template, nil)
+	global.formatCEL = getCEL(global.config.Template, nil)
 	global.filterCEL = getCEL(global.config.Filter, nil)
 
 	go kbd()
