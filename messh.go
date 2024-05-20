@@ -31,10 +31,10 @@ _	"golang.org/x/crypto/ssh"
 )
 
 type host struct {
-	addr	string
-	port	int
-	user	string
-	labels	[]string
+	Addr	string
+	Port	int
+	User	string
+	Labels	[]string
 }
 
 type Transfer struct {
@@ -118,9 +118,11 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("Config",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Session",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("a",			cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("b",			cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Time",		types.DurationType),
 			cel.Variable("Host",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
-			cel.Variable("Time",		types.DurationType),
 			cel.Variable("Cmd",			cel.StringType),
 			cel.Variable("Upload",		cel.StringType),
 			cel.Variable("Download",	cel.StringType),
@@ -203,7 +205,7 @@ func parseHosts (path string) []host {
 		} else {
 			port = 22
 		}
-		hosts = append(hosts, host{addr: hst, user: user, port: port, labels: labels})
+		hosts = append(hosts, host{Addr: hst, User: user, Port: port, Labels: labels})
 	}
 	return hosts
 }
@@ -242,6 +244,16 @@ func summary (results []result, session session) {
 	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(session.Err))
 }
 
+func order [T any] (expr string, list []T) {
+	orderCEL := getCEL(expr, nil)
+	sort.Slice(list, func(i, j int) bool {
+		return evalCEL(orderCEL, reflect.TypeOf(true), []any{}, map[string]any{
+			"a": list[i],
+			"b": list[j],
+		}).(bool)
+	})
+}
+
 func filterOne (res result, session session) bool {
 	filtmap := make(map[string]any)
 	if err := mapstructure.WeakDecode(res, &filtmap); err != nil {
@@ -267,21 +279,6 @@ func filterResults (results []result, session session) (filtered []result) {
 		}
 	}	
 	return
-}
-
-func sortResults (results []result) {
-	celenv, _ := cel.NewEnv(
-		cel.Variable("a", cel.MapType(cel.StringType, cel.AnyType)),
-		cel.Variable("b", cel.MapType(cel.StringType, cel.AnyType)),
-	)
-	sortCEL := getCEL(global.config.Sort, celenv)
-	sort.Slice(results, func(i, j int) bool {
-		sortmap := make(map[string]any)
-		sortmap["a"] = *results[i].as_map
-		sortmap["b"] = *results[j].as_map
-		val, _, _ := sortCEL.Eval(sortmap)
-		return val == types.True
-	})
 }
 
 func formatRes (res result, prg cel.Program) string {
@@ -339,11 +336,11 @@ func getAuth () func () goph.Auth {
 
 func execute (host host, job job) (result) {
 	start := time.Now()
-	res := result{Host: host.addr}
+	res := result{Host: host.Addr}
 
 	auth := getAuth()()
 	cb, _ := goph.DefaultKnownHosts()
-	ssh, err := goph.NewConn(&goph.Config{Auth: auth, User: host.user, Addr: host.addr, Port: uint(host.port), Callback: cb})
+	ssh, err := goph.NewConn(&goph.Config{Auth: auth, User: host.User, Addr: host.Addr, Port: uint(host.Port), Callback: cb})
 	if err != nil {
 		fmt.Println(err)
 		return res
@@ -496,7 +493,7 @@ func messh () {
 	session := getStats(results)
 	results = filterResults(results, session)
 // save(results) // sqlite
-	sortResults(results)
+	order(global.config.Sort, results)
 	output(results)
 // output(results, session) // file(s)
 	if ! global.config.Immediate {
@@ -512,6 +509,7 @@ func main () {
 
 	arg.MustParse(&global.config)
 	global.hosts = parseHosts(global.config.Hosts)
+	order(global.config.Order, global.hosts)
 
 	global.formatCEL = getCEL(global.config.Template, nil)
 	global.filterCEL = getCEL(global.config.Filter, nil)
