@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"context"
+	"reflect"
 	"path/filepath"
 	"github.com/fatih/color"
 //	"github.com/rivo/tview"
@@ -143,8 +144,29 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 	return prg
 }
 
-func evalCEL (prog cel.Program, rootmap any, fields map[string]any) {
+func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string]any) any {
+	rootmap := make(map[string]any)
+	for _, item := range root {
+		if err := mapstructure.WeakDecode(item, &rootmap); err != nil {
+			panic(err)
+		}
+	}
+	for varname, st := range fields {
+		fieldmap := make(map[string]any)
+		if err := mapstructure.WeakDecode(st, &fieldmap); err != nil {
+			panic(err)
+		}
+		rootmap[varname] = fieldmap
+	}
 
+	val, _, err := prog.Eval(rootmap)
+	if err != nil {
+		panic(err)
+	}
+	if result, err := val.ConvertToNative(want); err == nil {
+		return result
+	}
+	panic("failed to convert expression to wanted type")
 }
 
 func parseHosts (path string) []host {
@@ -276,15 +298,8 @@ func formatRes (res result, prg cel.Program) string {
 		extra[k] = v
 	}
 
-	wut, _, err := prg.Eval(extra)
-	if err != nil {
-		panic(err)
-	}
-	line, _ := ext.FormatString(wut, "")
-	if err != nil {
-		panic(err)
-	}
-	return line
+	line :=	evalCEL(prg, reflect.TypeOf("String"), []any{extra}, map[string]any{})
+	return line.(string)
 }
 
 func printRes (res result) {
