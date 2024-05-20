@@ -107,7 +107,7 @@ type Config struct {
 }
 
 func (Config) Version() string {
-	return "MeSSH 0.4.0"
+	return "MeSSH 0.5.0"
 }
 
 func getCEL(expr string, env *cel.Env) cel.Program {
@@ -254,27 +254,9 @@ func order [T any] (expr string, list []T) {
 	})
 }
 
-func filterOne (res result, session session) bool {
-	filtmap := make(map[string]any)
-	if err := mapstructure.WeakDecode(res, &filtmap); err != nil {
-		panic(err)
-	}
-	statmap := make(map[string]any)
-	if err := mapstructure.WeakDecode(session, &statmap); err != nil {
-		panic(err)
-	}
-	filtmap["Stats"] = statmap
-
-	val, _, err := global.filterCEL.Eval(filtmap)
-	if err != nil {
-		panic(err)
-	}
-	return val == types.True
-}
-
 func filterResults (results []result, session session) (filtered []result) {
 	for _, res := range results {
-		if filterOne(res, session) {
+		if evalCEL(global.filterCEL, reflect.TypeOf(true), []any{res}, map[string]any{"Session": session, "Config": global.config}).(bool) {
 			filtered = append(filtered, res)
 		}
 	}	
@@ -428,11 +410,8 @@ func output (results []result) {
 	files := make(map[string][]string)
 	prog := getCEL(global.config.Output, nil)
 	for _, res := range results {
-		val, _, err := prog.Eval(*res.as_map)
-		if err != nil {
-			panic(err)
-		}
-		path, _ := ext.FormatString(val, "")
+		val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config})
+		path := val.(string)
 		files[path] = append(files[path], formatRes(res, global.formatCEL))
 	}
 	for file, lines := range files {
