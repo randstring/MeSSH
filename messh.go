@@ -61,7 +61,7 @@ type result struct {
 	as_map		*map[string]interface{}
 }
 
-type stats struct {
+type session struct {
 	Ok		int
 	Err		int
 	Total	int
@@ -69,6 +69,10 @@ type stats struct {
 	Min		time.Duration
 	Max		time.Duration
 	Time	time.Duration
+}
+
+type stats struct {
+
 }
 
 var global struct {
@@ -83,10 +87,12 @@ var global struct {
 }
 
 type Config struct {
+	Bare		bool			`arg:"-b" help:"don't print extra headers or summary"`
 	Parallelism int				`arg:"-p" default:"1" help:"max number of parallel connection"`
 	Hosts		string			`arg:"-f,required"`
 	Template	string			`arg:"-t" default:"{host} {tag} {out}" help:"Format template"`
 	Output		string			`arg:"-o" default:"{host} {tag} {out}" help:"Output template"`
+	Order		string			`arg:"-O" help:"Order hosts before execution"`
 	Filter		string			`arg:"-F" help:"CEL expression to filter out unwanted entries"`
 	Immediate	bool			`arg:"-i" default:"true" help:"Print output immediately without waiting for all hosts to complete"`
 	Delay		time.Duration	`arg:"-d" default:"10ms" help:"Delay each new connection by specified time, to avoid congestion"`
@@ -108,13 +114,15 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 		newenv, err := cel.NewEnv(
 			ext.Math(),
 			ext.Strings(),
+			cel.Variable("Config",		cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Session",		cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Host",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
 			cel.Variable("Time",		types.DurationType),
 			cel.Variable("Cmd",			cel.StringType),
 			cel.Variable("Upload",		cel.StringType),
 			cel.Variable("Download",	cel.StringType),
-			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Host32",		cel.StringType),
 			cel.Variable("Arrow",		cel.StringType),
 			cel.Variable("Status",		cel.StringType),
@@ -135,6 +143,10 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 	return prg
 }
 
+func evalCEL (prog cel.Program, rootmap any, fields map[string]any) {
+
+}
+
 func parseHosts (path string) []host {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -148,11 +160,11 @@ func parseHosts (path string) []host {
 		var user, hst string
 		var labels []string
 		fields := strings.Fields(line)
-		if (len(fields) < 1) {
+		if len(fields) < 1 || strings.HasPrefix(line, "#") {
 			continue
-		} else if (len(fields) > 2) {
+		} else if len(fields) > 2 {
 			panic("broken record in hosts file")
-		} else if (len(fields) > 1) {
+		} else if len(fields) > 1 {
 			labels = strings.Split(fields[1], ",")
 		}
 		uhost := strings.Split(fields[0], "@")
@@ -175,6 +187,9 @@ func parseHosts (path string) []host {
 }
 
 func header () {
+	if global.config.Bare {
+		return
+	}
 	logo, _ := pterm.DefaultBigText.WithLetters(putils.LettersFromStringWithStyle(global.config.Version(), pterm.FgYellow.ToStyle())).Srender()
 	pterm.Println(logo)
 	pterm.DefaultSection.Println("Session parameters")
@@ -189,26 +204,29 @@ func header () {
 	pterm.DefaultSection.Println("Running command ...")
 }
 
-func summary (results []result, stats stats) {
+func summary (results []result, session session) {
+	if global.config.Bare {
+		return
+	}
 	pterm.DefaultSection.Println("Session summary")
 	pterm.Println(pterm.Yellow("* Date                  :"), pterm.Cyan(time.Now()))
 	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(time.Now().Sub(global.start)))
-	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(stats.Time))
-	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(stats.Avg))
-	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(stats.Min))
-	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(stats.Min))
+	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(session.Time))
+	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(session.Avg))
+	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(session.Min))
+	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(session.Min))
 	pterm.Println(pterm.Yellow("* Total results         :"), pterm.Cyan(len(results)))
-	pterm.Println(pterm.Yellow("* Successful            :"), pterm.Cyan(stats.Ok))
-	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(stats.Err))
+	pterm.Println(pterm.Yellow("* Successful            :"), pterm.Cyan(session.Ok))
+	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(session.Err))
 }
 
-func filterOne (res result, stats stats) bool {
+func filterOne (res result, session session) bool {
 	filtmap := make(map[string]any)
 	if err := mapstructure.WeakDecode(res, &filtmap); err != nil {
 		panic(err)
 	}
 	statmap := make(map[string]any)
-	if err := mapstructure.WeakDecode(stats, &statmap); err != nil {
+	if err := mapstructure.WeakDecode(session, &statmap); err != nil {
 		panic(err)
 	}
 	filtmap["Stats"] = statmap
@@ -220,9 +238,9 @@ func filterOne (res result, stats stats) bool {
 	return val == types.True
 }
 
-func filterResults (results []result, stats stats) (filtered []result) {
+func filterResults (results []result, session session) (filtered []result) {
 	for _, res := range results {
-		if filterOne(res, stats) {
+		if filterOne(res, session) {
 			filtered = append(filtered, res)
 		}
 	}	
@@ -278,12 +296,12 @@ func printRes (res result) {
 }
 
 func render (res result, results []result) {
-	stats := getStats(results)
+	session := getStats(results)
 	if global.config.Immediate {
 		printRes(res)
 	}
 	global.progress.UpdateTitle(fmt.Sprintf("%d/%d conns, %d OK, %d ERR, %s avg",
-					global.pool.GetCurrent(), global.pool.GetSize(), stats.Ok, stats.Err, stats.Avg))
+					global.pool.GetCurrent(), global.pool.GetSize(), session.Ok, session.Err, session.Avg))
 	global.progress.Increment()
 }
 
@@ -350,28 +368,28 @@ func execute (host host, job job) (result) {
 	return res
 }
 
-func getStats (results []result) stats {
-	stats := stats{}
+func getStats (results []result) session {
+	session := session{}
 	var spent time.Duration
 	for _, res := range results {
 		if res.Cmd == nil {
-			stats.Ok++
+			session.Ok++
 		} else {
-			stats.Err++
+			session.Err++
 		}
-		if res.Time < stats.Min {
-			stats.Min = res.Time
-		} else if res.Time > stats.Max {
-			stats.Max = res.Time
+		if res.Time < session.Min {
+			session.Min = res.Time
+		} else if res.Time > session.Max {
+			session.Max = res.Time
 		}
 		spent += res.Time
 	}
-	stats.Total = stats.Ok + stats.Err
+	session.Total = session.Ok + session.Err
 	if len(results) > 0 {
-		stats.Avg = spent / time.Duration(len(results))
+		session.Avg = spent / time.Duration(len(results))
 	}
-	stats.Time = time.Now().Sub(global.start)
-	return stats
+	session.Time = time.Now().Sub(global.start)
+	return session
 }
 
 func dial (job job) []result {
@@ -460,18 +478,18 @@ func messh () {
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
 
 	results := dial(job{cmd: append([]string{global.config.Command}, global.config.Args...)})
-	stats := getStats(results)
-	results = filterResults(results, stats)
+	session := getStats(results)
+	results = filterResults(results, session)
 // save(results) // sqlite
 	sortResults(results)
 	output(results)
-// output(results, stats) // file(s)
+// output(results, session) // file(s)
 	if ! global.config.Immediate {
 		for _, res := range results {
 			printRes(res)
 		}
 	}
-	summary(results, stats)
+	summary(results, session)
 }
 
 func main () {
