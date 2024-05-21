@@ -78,6 +78,7 @@ type stats struct {
 
 var global struct {
 	config		Config
+	stats		stats
 	hosts		[]host
 	results		[]result
 	start		time.Time
@@ -250,13 +251,17 @@ func order [T any] (expr string, list []T) {
 		return evalCEL(orderCEL, reflect.TypeOf(true), []any{}, map[string]any{
 			"a": list[i],
 			"b": list[j],
+			"Config": global.config,
 		}).(bool)
 	})
 }
 
 func filterResults (results []result, session session) (filtered []result) {
 	for _, res := range results {
-		if evalCEL(global.filterCEL, reflect.TypeOf(true), []any{res}, map[string]any{"Session": session, "Config": global.config}).(bool) {
+		if evalCEL(global.filterCEL, reflect.TypeOf(true), []any{res}, map[string]any{
+				"Session": session,
+				"Config": global.config
+		}).(bool) {
 			filtered = append(filtered, res)
 		}
 	}	
