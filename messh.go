@@ -96,7 +96,7 @@ type Config struct {
 	Output		string			`arg:"-o" default:"{host} {tag} {out}" help:"Output template"`
 	Order		string			`arg:"-O" help:"Order hosts before execution"`
 	Filter		string			`arg:"-F" help:"CEL expression to filter out unwanted entries"`
-	Immediate	bool			`arg:"-i" default:"true" help:"Print output immediately without waiting for all hosts to complete"`
+	Immediate	string			`arg:"-i" default:"true" help:"Print immediately without waiting for all hosts to complete"`
 	Delay		time.Duration	`arg:"-d" default:"10ms" help:"Delay each new connection by specified time, to avoid congestion"`
 	Labels		[]string		`arg:"-l" placeholder:"LABEL..." help:"Execute command only on hosts having the specified labels"`			
 	Group		[]string		`arg:"-g" placeholder:"FIELD|LABEL..." help:"Group connections by the specified fields or labels"`
@@ -260,7 +260,7 @@ func filterResults (results []result, session session) (filtered []result) {
 	for _, res := range results {
 		if evalCEL(global.filterCEL, reflect.TypeOf(true), []any{res}, map[string]any{
 				"Session": session,
-				"Config": global.config
+				"Config": global.config,
 		}).(bool) {
 			filtered = append(filtered, res)
 		}
@@ -291,12 +291,15 @@ func printRes (res result) {
 		return
 	}
 
-	pterm.Println(formatRes(res, global.formatCEL))
+	line := formatRes(res, global.formatCEL)
+	if line != "" {
+		pterm.Println(line)
+	}
 }
 
 func render (res result, results []result) {
 	session := getStats(results)
-	if global.config.Immediate {
+	if global.config.Immediate != "" {
 		printRes(res)
 	}
 	global.progress.UpdateTitle(fmt.Sprintf("%d/%d conns, %d OK, %d ERR, %s avg",
@@ -480,7 +483,7 @@ func messh () {
 	order(global.config.Sort, results)
 	output(results)
 // output(results, session) // file(s)
-	if ! global.config.Immediate {
+	if global.config.Immediate != "" {
 		for _, res := range results {
 			printRes(res)
 		}
