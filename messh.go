@@ -20,6 +20,7 @@ _	"golang.org/x/crypto/ssh"
 	"github.com/pterm/pterm/putils"
 	"github.com/eiannone/keyboard"
 	"github.com/alecthomas/kong"
+	"github.com/alecthomas/kong-hcl"
 
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/cel"
@@ -82,11 +83,13 @@ var global struct {
 	start		time.Time
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
-	version		string "0.6.0"
+	paused		bool
+	version		string "0.6.1"
 }
 
 type Config struct {
 	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
+	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
 	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
 	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
 	Parallelism		int				`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
@@ -183,6 +186,7 @@ func parseHost (line string) host {
 	var port int
 	var user, hst string
 	var labels []string
+	line = strings.TrimSpace(line)
 	fields := strings.Fields(line)
 	if len(fields) < 1 || len(fields) > 2 {
 		panic("broken record in hosts file")
@@ -453,19 +457,22 @@ func kbd () {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("You pressed: rune %q, key %X\r\n", char, key)
+//		fmt.Printf("You pressed: rune %q, key %X\r\n", char, key)
 		if key == keyboard.KeyCtrlC {
 			os.Exit(0)
 
 			global.pool.Stop()
 			pterm.DefaultInteractiveConfirm.WithDefaultText("Abort?").Show()
 			time.Sleep(30 * time.Second)
-		} else if key == keyboard.KeySpace {
+		} else if key == keyboard.KeySpace && !global.paused {
+			global.paused = true
 			global.progress.UpdateTitle("[PAUSED] " + global.progress.Title)
-//			global.progress.Stop()
+			global.progress.Stop()
 			global.pool.Stop()
-		} else if key == keyboard.KeyEnter {
-//			global.progress.Start()
+		} else if key == keyboard.KeyEnter && global.paused {
+			global.paused = false
+			global.progress.UpdateTitle(strings.TrimPrefix(global.progress.Title, "[PAUSED] "))
+			global.progress.Start()
 			global.pool.Start()
 		} else if char == '+' {
 			fmt.Println("Size is", global.pool.GetSize())
@@ -480,26 +487,18 @@ func kbd () {
 	}
 }
 
-func messh () {
+func main () {
+	global.start = time.Now()
+	kong.Parse(&global.config, kong.Vars{"version": global.version}, kong.Configuration(konghcl.Loader, "messh.conf"))
+
+	global.hosts = prepareHosts(global.config.Hosts.File)
+
+	go kbd()
 	header()
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
-
 	results := dial(job{cmd: global.config.Command})
 // save(results) // sqlite
 	display(results)
 	output(results)
 	summary(results)
-}
-
-func main () {
-	global.start = time.Now()
-
-	kong.Parse(&global.config, kong.Vars{"version": global.version})
-//spew.Dump(global.config)
-
-//os.Exit(0)
-	global.hosts = prepareHosts(global.config.Hosts.File)
-
-	go kbd()
-	messh()
 }
