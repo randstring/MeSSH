@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"path/filepath"
 	"github.com/fatih/color"
-//	"github.com/rivo/tview"
 	"github.com/sherifabdlnaby/gpool"
 _	"github.com/davecgh/go-spew/spew"
 	"github.com/melbahja/goph"
@@ -20,9 +19,7 @@ _	"golang.org/x/crypto/ssh"
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
 	"github.com/eiannone/keyboard"
-	"github.com/alexflint/go-arg"
-
-//	"github.com/valyala/fasttemplate"
+	"github.com/alecthomas/kong"
 
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/cel"
@@ -59,17 +56,17 @@ type result struct {
 	Upload		error
 	Download	error
 	Time		time.Duration
-	as_map		*map[string]interface{}
 }
 
 type session struct {
-	Ok		int
-	Err		int
-	Total	int
-	Avg		time.Duration
-	Min		time.Duration
-	Max		time.Duration
-	Time	time.Duration
+	Ok			int
+	Err			int
+	Count		int
+	Avg			time.Duration
+	Min			time.Duration
+	Max			time.Duration
+	Total		time.Duration
+	Duration	time.Duration
 }
 
 type stats struct {
@@ -79,36 +76,46 @@ type stats struct {
 var global struct {
 	config		Config
 	stats		stats
+	session		session
 	hosts		[]host
 	results		[]result
 	start		time.Time
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
-	formatCEL	cel.Program
-	filterCEL	cel.Program
+	version		string "0.6.0"
 }
 
 type Config struct {
-	Bare		bool			`arg:"-b" help:"don't print extra headers or summary"`
-	Parallelism int				`arg:"-p" default:"1" help:"max number of parallel connection"`
-	Hosts		string			`arg:"-f,required"`
-	Template	string			`arg:"-t" default:"{host} {tag} {out}" help:"Format template"`
-	Output		string			`arg:"-o" default:"{host} {tag} {out}" help:"Output template"`
-	Order		string			`arg:"-O" help:"Order hosts before execution"`
-	Filter		string			`arg:"-F" help:"CEL expression to filter out unwanted entries"`
-	Immediate	string			`arg:"-i" default:"true" help:"Print immediately without waiting for all hosts to complete"`
-	Delay		time.Duration	`arg:"-d" default:"10ms" help:"Delay each new connection by specified time, to avoid congestion"`
-	Labels		[]string		`arg:"-l" placeholder:"LABEL..." help:"Execute command only on hosts having the specified labels"`			
-	Group		[]string		`arg:"-g" placeholder:"FIELD|LABEL..." help:"Group connections by the specified fields or labels"`
-	Upload		[]string		`arg:"-U" placeholder:"LOCAL [REMOTE]"`
-	Download	string			`arg:"-D" placeholder:"REMOTE [LOCAL]"`
-	Sort		string			`arg:"-s"`
-	Command		string			`arg:"positional" help:"Command to run"`
-	Args		[]string		`arg:"positional" help:"Any command line arguments"`
-}
-
-func (Config) Version() string {
-	return "MeSSH 0.5.0"
+	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
+	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
+	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
+	Parallelism		int				`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
+	Hosts			struct {
+		File		[]byte			`short:"f" aliases:"read" required type:"filecontent" help:"hosts file"`
+		Filter		string			`placeholder:"EXPR(host)bool" help:"hosts filter expression"`
+		Order		string			`placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
+	}								`embed prefix:"hosts-"`
+	Print			struct {
+		Template	string			`short:"p" placeholder:"EXPR(host)string" help:"hosts filter expression"`
+		Order		string			`placeholder:"EXPR(a,b)bool" help:"print ordering expression"`
+	}								`embed prefix:"print-"`
+	Log				struct {
+		File		string			`short:"l" placeholder:"EXPR(res)string" help:"string expression to generate log path"`
+		Template	string			`placeholder:"EXPR(res)string" help:"string expression to generate log output"`		
+		Order		string			`placeholder:"EXPR(a,b)bool" help:"log ordering expression"`
+	}								`embed prefix:"log-"`
+	Immed			string			`short:"i" aliases:"immediate" placeholder:"EXPR(res)string" help:"expression to print immediately for each result"`
+	Script			string			`short:"x" type:"existingfile" help:"script to upload and run on each host"`
+	Upload			struct	{
+		From		string			`short:"U" type:"existingfile" placeholder:"LOCAL" help:"local file to upload"`
+		To			string			`aliases:"ut" placeholder:"REMOTE" help:"remote file path for upload"`
+	}								`embed prefix:"upload-"`
+	Download		struct	{
+		From		string			`short:"D" placeholder:"REMOTE" help:"remote file to download"`
+		To			string			`aliases:"dt" placeholder:"EXPR(res)string" help:"local path expression to download files to"`
+	}								`embed prefix:"download-"`
+	Command			[]string		`arg optional help:"Command to run"`
+	Version			kong.VersionFlag`short:"V" set:"version=0" help:"display version"`
 }
 
 func getCEL(expr string, env *cel.Env) cel.Program {
@@ -172,41 +179,53 @@ func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string
 	panic("failed to convert expression to wanted type")
 }
 
-func parseHosts (path string) []host {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
+func parseHost (line string) host {
+	var port int
+	var user, hst string
+	var labels []string
+	fields := strings.Fields(line)
+	if len(fields) < 1 || len(fields) > 2 {
+		panic("broken record in hosts file")
+	} else if len(fields) > 1 {
+		labels = strings.Split(fields[1], ",")
+	}
+	uhost := strings.Split(fields[0], "@")
+	if len(uhost) > 1 {
+		user, hst = uhost[0], uhost[1]
+	} else {
+		user = "root"
+		hst = fields[0]
+	}
+	hostaddr := strings.Split(hst, ":")
+	if len(hostaddr) > 1 {
+		hst = hostaddr[0]
+		port, _ = strconv.Atoi(hostaddr[1])
+	} else {
+		port = 22
+	}
+	return host{Addr: hst, User: user, Port: port, Labels: labels}
+}
+
+func prepareHosts (content []byte) []host {
+	var hosts []host
+	var filter cel.Program
+ 	if global.config.Hosts.Filter != "" {
+		filter = getCEL(global.config.Hosts.Filter, nil)
 	}
 
-	var hosts []host
 	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
-		var port int
-		var user, hst string
-		var labels []string
-		fields := strings.Fields(line)
-		if len(fields) < 1 || strings.HasPrefix(line, "#") {
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
 			continue
-		} else if len(fields) > 2 {
-			panic("broken record in hosts file")
-		} else if len(fields) > 1 {
-			labels = strings.Split(fields[1], ",")
 		}
-		uhost := strings.Split(fields[0], "@")
-		if len(uhost) > 1 {
-			user, hst = uhost[0], uhost[1]
-		} else {
-			user = "root"
-			hst = fields[0]
+		hostent := parseHost(line)
+		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{}).(bool) {
+			hosts = append(hosts, hostent)
 		}
-		hostaddr := strings.Split(hst, ":")
-		if len(hostaddr) > 1 {
-			hst = hostaddr[0]
-			port, _ = strconv.Atoi(hostaddr[1])
-		} else {
-			port = 22
-		}
-		hosts = append(hosts, host{Addr: hst, User: user, Port: port, Labels: labels})
+	}
+
+	if global.config.Hosts.Order != "" {
+		order(global.config.Hosts.Order, hosts)
 	}
 	return hosts
 }
@@ -215,7 +234,7 @@ func header () {
 	if global.config.Bare {
 		return
 	}
-	logo, _ := pterm.DefaultBigText.WithLetters(putils.LettersFromStringWithStyle(global.config.Version(), pterm.FgYellow.ToStyle())).Srender()
+	logo, _ := pterm.DefaultBigText.WithLetters(putils.LettersFromStringWithStyle(global.version, pterm.FgYellow.ToStyle())).Srender()
 	pterm.Println(logo)
 	pterm.DefaultSection.Println("Session parameters")
 	pterm.Println(pterm.Yellow("* Date              	:"), pterm.Cyan(time.Now()))
@@ -224,25 +243,24 @@ func header () {
 	pterm.Println(pterm.Yellow("* Parallel instances	:"), pterm.Cyan(global.config.Parallelism))
 	pterm.Println(pterm.Yellow("* Delay             	:"), pterm.Cyan(global.config.Delay))
 	pterm.Println(pterm.Yellow("* Command            	:"), pterm.Cyan(global.config.Command))
-	pterm.Println(pterm.Yellow("* Args              	:"), pterm.Cyan(global.config.Args))
+	pterm.Println(pterm.Yellow("* Connect timeout       :"), pterm.Cyan(global.config.Timeout))
 
 	pterm.DefaultSection.Println("Running command ...")
 }
 
-func summary (results []result, session session) {
+func summary (results []result) {
 	if global.config.Bare {
 		return
 	}
 	pterm.DefaultSection.Println("Session summary")
 	pterm.Println(pterm.Yellow("* Date                  :"), pterm.Cyan(time.Now()))
-	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(time.Now().Sub(global.start)))
-	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(session.Time))
-	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(session.Avg))
-	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(session.Min))
-	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(session.Min))
+	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(global.session.Total))
+	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(global.session.Avg))
+	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(global.session.Min))
+	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(global.session.Max))
 	pterm.Println(pterm.Yellow("* Total results         :"), pterm.Cyan(len(results)))
-	pterm.Println(pterm.Yellow("* Successful            :"), pterm.Cyan(session.Ok))
-	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(session.Err))
+	pterm.Println(pterm.Yellow("* Successful            :"), pterm.Cyan(global.session.Ok))
+	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(global.session.Err))
 }
 
 func order [T any] (expr string, list []T) {
@@ -256,20 +274,8 @@ func order [T any] (expr string, list []T) {
 	})
 }
 
-func filterResults (results []result, session session) (filtered []result) {
-	for _, res := range results {
-		if evalCEL(global.filterCEL, reflect.TypeOf(true), []any{res}, map[string]any{
-				"Session": session,
-				"Config": global.config,
-		}).(bool) {
-			filtered = append(filtered, res)
-		}
-	}	
-	return
-}
-
-func formatRes (res result, prg cel.Program) string {
-	extra := map[string]interface{}{
+func formatRes (res result, prog cel.Program) string {
+	extra := map[string]any{
 		"Host32":	fmt.Sprintf("%32s", res.Host),
 		"Status":	"OK",
 		"Arrow"	:	color.GreenString("->"),
@@ -278,32 +284,37 @@ func formatRes (res result, prg cel.Program) string {
 		extra["Status"] = "ERR"
 		extra["Arrow"] = color.RedString("=:")
 	}
-	for k, v := range *res.as_map {
-		extra[k] = v
-	}
 
-	line :=	evalCEL(prg, reflect.TypeOf("String"), []any{extra}, map[string]any{})
+	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{})
 	return line.(string)
 }
 
-func printRes (res result) {
-	if global.config.Template == "" {
-		return
-	}
-
-	line := formatRes(res, global.formatCEL)
+func printRes (res result, prog cel.Program) {
+	line := formatRes(res, prog)
 	if line != "" {
 		pterm.Println(line)
 	}
 }
 
-func render (res result, results []result) {
-	session := getStats(results)
-	if global.config.Immediate != "" {
-		printRes(res)
+func display(results []result) {
+	if global.config.Print.Order != "" {
+		order(global.config.Print.Order, results)
+	}
+	if global.config.Print.Template != "" {
+		prog := getCEL(global.config.Print.Template, nil)
+		for _, res := range results {
+			printRes(res, prog)
+		}
+	}
+}
+
+func render (res result, prog cel.Program) {
+	updateStats(res)
+	if prog != nil {
+		printRes(res, prog)
 	}
 	global.progress.UpdateTitle(fmt.Sprintf("%d/%d conns, %d OK, %d ERR, %s avg",
-					global.pool.GetCurrent(), global.pool.GetSize(), session.Ok, session.Err, session.Avg))
+					global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg))
 	global.progress.Increment()
 }
 
@@ -363,47 +374,41 @@ func execute (host host, job job) (result) {
 
 	end := time.Now()
 	res.Time = end.Sub(start)
-	if err := mapstructure.WeakDecode(res, &res.as_map); err != nil {
-		panic(err)
-	}
 
 	return res
 }
 
-func getStats (results []result) session {
-	session := session{}
-	var spent time.Duration
-	for _, res := range results {
-		if res.Cmd == nil {
-			session.Ok++
-		} else {
-			session.Err++
-		}
-		if res.Time < session.Min {
-			session.Min = res.Time
-		} else if res.Time > session.Max {
-			session.Max = res.Time
-		}
-		spent += res.Time
+func updateStats (res result) {
+	global.session.Count++
+	if res.Cmd == nil {
+		global.session.Ok++
+	} else {
+		global.session.Err++
 	}
-	session.Total = session.Ok + session.Err
-	if len(results) > 0 {
-		session.Avg = spent / time.Duration(len(results))
+	if res.Time < global.session.Min {
+		global.session.Min = res.Time
+	} else if res.Time > global.session.Max {
+		global.session.Max = res.Time
 	}
-	session.Time = time.Now().Sub(global.start)
-	return session
+	global.session.Total += res.Time
+	global.session.Avg = global.session.Total / time.Duration(global.session.Count)
+	global.session.Duration = time.Now().Sub(global.start)
 }
 
 func dial (job job) []result {
 	var results []result
+	var prog cel.Program
+	if global.config.Immed != "" {
+		prog = getCEL(global.config.Immed, nil)
+	}
 	global.pool = gpool.NewPool(global.config.Parallelism)
 	for _, host := range global.hosts {
 		host := host
 		global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
 			result := execute(host, job)
+			render(result, prog)
 			results = append(results, result)
-			render(result, results)
 		})
 	}
 	global.pool.Stop()
@@ -412,15 +417,18 @@ func dial (job job) []result {
 }
 
 func output (results []result) {
-	if global.config.Output == "" || global.config.Template == "" {
+	if global.config.Log.File == "" || global.config.Log.Template == "" {
 		return
+	} else if global.config.Log.Order != "" {
+		order(global.config.Log.Order, results)
 	}
 	files := make(map[string][]string)
-	prog := getCEL(global.config.Output, nil)
+	fileprog := getCEL(global.config.Log.File, nil)
+	filtprog := getCEL(global.config.Log.Template, nil)
 	for _, res := range results {
-		val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config})
+		val := evalCEL(fileprog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config})
 		path := val.(string)
-		files[path] = append(files[path], formatRes(res, global.formatCEL))
+		files[path] = append(files[path], formatRes(res, filtprog))
 	}
 	for file, lines := range files {
 		dir := filepath.Dir(file)
@@ -476,30 +484,21 @@ func messh () {
 	header()
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
 
-	results := dial(job{cmd: append([]string{global.config.Command}, global.config.Args...)})
-	session := getStats(results)
-	results = filterResults(results, session)
+	results := dial(job{cmd: global.config.Command})
 // save(results) // sqlite
-	order(global.config.Sort, results)
+	display(results)
 	output(results)
-// output(results, session) // file(s)
-	if global.config.Immediate != "" {
-		for _, res := range results {
-			printRes(res)
-		}
-	}
-	summary(results, session)
+	summary(results)
 }
 
 func main () {
 	global.start = time.Now()
 
-	arg.MustParse(&global.config)
-	global.hosts = parseHosts(global.config.Hosts)
-	order(global.config.Order, global.hosts)
+	kong.Parse(&global.config, kong.Vars{"version": global.version})
+//spew.Dump(global.config)
 
-	global.formatCEL = getCEL(global.config.Template, nil)
-	global.filterCEL = getCEL(global.config.Filter, nil)
+//os.Exit(0)
+	global.hosts = prepareHosts(global.config.Hosts.File)
 
 	go kbd()
 	messh()
