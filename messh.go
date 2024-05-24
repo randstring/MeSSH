@@ -14,7 +14,7 @@ import (
 	"github.com/sherifabdlnaby/gpool"
 _	"github.com/davecgh/go-spew/spew"
 	"github.com/melbahja/goph"
-_	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
@@ -26,6 +26,8 @@ _	"golang.org/x/crypto/ssh"
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
 	"github.com/mitchellh/mapstructure"
+
+_	"runtime/pprof"
 )
 
 type host struct {
@@ -84,7 +86,7 @@ var global struct {
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
 	paused		bool
-	version		string "0.6.1"
+	version		string
 }
 
 type Config struct {
@@ -339,13 +341,12 @@ func getAuth () func () goph.Auth {
 	}
 }
 
-func execute (host host, job job) (result) {
+func execute (host host, job job, knownHosts ssh.HostKeyCallback) (result) {
 	start := time.Now()
 	res := result{Host: host.Addr}
 
 	auth := getAuth()()
-	cb, _ := goph.DefaultKnownHosts()
-	ssh, err := goph.NewConn(&goph.Config{Auth: auth, User: host.User, Addr: host.Addr, Port: uint(host.Port), Callback: cb})
+	ssh, err := goph.NewConn(&goph.Config{Auth: auth, User: host.User, Addr: host.Addr, Port: uint(host.Port), Callback: knownHosts})
 	if err != nil {
 		fmt.Println(err)
 		return res
@@ -405,12 +406,13 @@ func dial (job job) []result {
 	if global.config.Immed != "" {
 		prog = getCEL(global.config.Immed, nil)
 	}
+	knownHosts, _ := goph.DefaultKnownHosts()
 	global.pool = gpool.NewPool(global.config.Parallelism)
 	for _, host := range global.hosts {
 		host := host
 		global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
-			result := execute(host, job)
+			result := execute(host, job, knownHosts)
 			render(result, prog)
 			results = append(results, result)
 		})
@@ -488,6 +490,7 @@ func kbd () {
 }
 
 func main () {
+	global.version = "MeSSH 0.6.2"
 	global.start = time.Now()
 	kong.Parse(&global.config, kong.Vars{"version": global.version}, kong.Configuration(konghcl.Loader, "messh.conf"))
 
@@ -497,6 +500,12 @@ func main () {
 	header()
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
 	results := dial(job{cmd: global.config.Command})
+/*
+	f, _ := os.Create("messh.prof")
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		panic(err)
+	}
+*/
 // save(results) // sqlite
 	display(results)
 	output(results)
