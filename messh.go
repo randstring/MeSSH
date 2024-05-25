@@ -27,6 +27,9 @@ _	"github.com/davecgh/go-spew/spew"
 	"github.com/google/cel-go/ext"
 	"github.com/mitchellh/mapstructure"
 
+	"gorm.io/gorm"
+	"gorm.io/driver/sqlite"
+
 _	"runtime/pprof"
 )
 
@@ -35,6 +38,7 @@ type host struct {
 	Port	int
 	User	string
 	Labels	[]string
+	stats	HostStats
 }
 
 type Transfer struct {
@@ -72,19 +76,54 @@ type session struct {
 	Duration	time.Duration
 }
 
-type stats struct {
+type HostData struct {
+	gorm.Model
+	Host		string
+	Out			string
+	Failed		bool
+	Time		time.Duration
+	SessionID	uint
+	Session		SessData
+}
 
+type SessData struct {
+	gorm.Model
+	Command		string
+}
+
+type HostStats struct {
+	Count		int
+	OK			int
+	Err			int
+	Period		float32 // takes part in each N sessions
+	Avg			time.Duration
+	Min			time.Duration
+	Max			time.Duration
+	Last		time.Duration
+}
+
+type SessStats struct {
+	Count		int
+	Cmd			string
+	AvgHosts	float32
+	Avg			time.Duration
+	Min			time.Duration
+	Max			time.Duration
+	Last		time.Duration
+	Period		time.Duration
 }
 
 var global struct {
 	config		Config
-	stats		stats
+	stats		SessStats
 	session		session
 	hosts		[]host
 	results		[]result
 	start		time.Time
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
+	db			*gorm.DB
+	sessid		uint
 	paused		bool
 	version		string
 }
@@ -93,6 +132,7 @@ type Config struct {
 	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
 	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
 	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
+	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
 	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
 	Parallelism		int				`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
 	Hosts			struct {
@@ -228,6 +268,7 @@ func prepareHosts (content []byte) []host {
 		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{}).(bool) {
 			hosts = append(hosts, hostent)
 		}
+		// fetch from DB
 	}
 
 	if global.config.Hosts.Order != "" {
@@ -318,6 +359,9 @@ func render (res result, prog cel.Program) {
 	updateStats(res)
 	if prog != nil {
 		printRes(res, prog)
+	}
+	if global.db != nil {
+		global.db.Create(&HostData{SessionID: global.sessid, Time: res.Time, Host: res.Host, Out: res.Out, Failed: res.Cmd != nil})
 	}
 	global.progress.UpdateTitle(fmt.Sprintf("%d/%d conns, %d OK, %d ERR, %s avg",
 					global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg))
@@ -489,11 +533,33 @@ func kbd () {
 	}
 }
 
-func main () {
-	global.version = "MeSSH 0.6.2"
-	global.start = time.Now()
-	kong.Parse(&global.config, kong.Vars{"version": global.version}, kong.Configuration(konghcl.Loader, "messh.conf"))
+func dbOpen () {
+	if global.config.Database == "" {
+		return
+	}
+	db, err := gorm.Open(sqlite.Open(global.config.Database), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
 
+	// Migrate the schema
+	db.AutoMigrate(&HostData{})
+
+	// Populate global stats:
+
+
+	sess := SessData{Command: strings.Join(global.config.Command, " ")}
+	db.Create(&sess)
+	global.db = db
+	global.sessid = sess.ID
+}
+
+func main () {
+	global.version = "MeSSH 0.6.3"
+	global.start = time.Now()
+
+	kong.Parse(&global.config, kong.Vars{"version": global.version}, kong.Configuration(konghcl.Loader, "messh.conf"))
+	dbOpen()
 	global.hosts = prepareHosts(global.config.Hosts.File)
 
 	go kbd()
@@ -506,7 +572,6 @@ func main () {
 		panic(err)
 	}
 */
-// save(results) // sqlite
 	display(results)
 	output(results)
 	summary(results)
