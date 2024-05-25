@@ -136,7 +136,7 @@ type Config struct {
 	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
 	Parallelism		int				`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
 	Hosts			struct {
-		File		[]byte			`short:"f" aliases:"read" required type:"filecontent" help:"hosts file"`
+		File		string			`short:"f" aliases:"read" required type:"existingfile" help:"hosts file"`
 		Filter		string			`placeholder:"EXPR(host)bool" help:"hosts filter expression"`
 		Order		string			`placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
 	}								`embed prefix:"hosts-"`
@@ -252,7 +252,11 @@ func parseHost (line string) host {
 	return host{Addr: hst, User: user, Port: port, Labels: labels}
 }
 
-func prepareHosts (content []byte) []host {
+func prepareHosts (path string) []host {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
 	var hosts []host
 	var filter cel.Program
  	if global.config.Hosts.Filter != "" {
@@ -285,7 +289,8 @@ func header () {
 	pterm.Println(logo)
 	pterm.DefaultSection.Println("Session parameters")
 	pterm.Println(pterm.Yellow("* Date              	:"), pterm.Cyan(time.Now()))
-	pterm.Println(pterm.Yellow("* Hosts file        	:"), pterm.Cyan(global.config.Hosts))
+	pterm.Println(pterm.Yellow("* Config file           :"), pterm.Cyan(global.config.Config))
+	pterm.Println(pterm.Yellow("* Hosts file        	:"), pterm.Cyan(global.config.Hosts.File))
 	pterm.Println(pterm.Yellow("* Hosts count       	:"), pterm.Cyan(len(global.hosts)))
 	pterm.Println(pterm.Yellow("* Parallel instances	:"), pterm.Cyan(global.config.Parallelism))
 	pterm.Println(pterm.Yellow("* Delay             	:"), pterm.Cyan(global.config.Delay))
@@ -503,10 +508,8 @@ func kbd () {
 		if err != nil {
 			panic(err)
 		}
-//		fmt.Printf("You pressed: rune %q, key %X\r\n", char, key)
 		if key == keyboard.KeyCtrlC {
 			os.Exit(0)
-
 			global.pool.Stop()
 			pterm.DefaultInteractiveConfirm.WithDefaultText("Abort?").Show()
 			time.Sleep(30 * time.Second)
@@ -555,7 +558,7 @@ func dbOpen () {
 }
 
 func main () {
-	global.version = "MeSSH 0.6.3"
+	global.version = "MeSSH 0.6.4"
 	global.start = time.Now()
 
 	kong.Parse(&global.config, kong.Vars{"version": global.version}, kong.Configuration(konghcl.Loader, "messh.conf"))
