@@ -22,6 +22,8 @@ _	"github.com/davecgh/go-spew/spew"
 	"github.com/alecthomas/kong"
 	"github.com/alecthomas/kong-hcl"
 
+	"github.com/thanhpk/randstr"
+
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
@@ -405,6 +407,31 @@ func execute (host host, job job, knownHosts ssh.HostKeyCallback) (result) {
 	if job.upload != nil {
 		res.Upload = ssh.Upload(job.upload.from, job.upload.to)
 	}
+	// script execution?
+	if global.config.Script != "" {
+		rnd := "/tmp/" + filepath.Base(global.config.Script) + "." + randstr.String(32)
+		err := ssh.Upload(global.config.Script, rnd)
+		if err != nil {
+			res.Cmd = err
+			return res
+		}
+		ftp, err := ssh.NewSftp()
+		if err != nil {
+			res.Cmd = err
+			return res
+		}
+		defer ftp.Remove(rnd)
+		err = ftp.Chmod(rnd, 0700)
+		if err != nil {
+			res.Cmd = err
+			return res
+		}
+		if len(job.cmd) > 0 {
+			job.cmd = append([]string{rnd, "&&"}, job.cmd...)
+		} else {
+			job.cmd = []string{rnd}
+		}
+	}
 	if len(job.cmd) > 0 {
 		cmd, err := ssh.Command(job.cmd[0], job.cmd[1:]...)
 		if err != nil {
@@ -516,12 +543,12 @@ func kbd () {
 		} else if key == keyboard.KeySpace && !global.paused {
 			global.paused = true
 			global.progress.UpdateTitle("[PAUSED] " + global.progress.Title)
-			global.progress.Stop()
+//			global.progress.Stop()
 			global.pool.Stop()
 		} else if key == keyboard.KeyEnter && global.paused {
 			global.paused = false
 			global.progress.UpdateTitle(strings.TrimPrefix(global.progress.Title, "[PAUSED] "))
-			global.progress.Start()
+//			global.progress.Start()
 			global.pool.Start()
 		} else if char == '+' {
 			fmt.Println("Size is", global.pool.GetSize())

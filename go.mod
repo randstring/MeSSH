@@ -3,7 +3,8 @@ module gosh
 go 1.19
 
 require (
-	github.com/alexflint/go-arg v1.4.3
+	github.com/alecthomas/kong v0.9.0
+	github.com/alecthomas/kong-hcl v1.0.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/fatih/color v1.16.0
@@ -12,16 +13,16 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/pterm/pterm v0.12.66
 	github.com/sherifabdlnaby/gpool v1.1.0
+	github.com/thanhpk/randstr v1.0.6
 	golang.org/x/crypto v0.6.0
+	gorm.io/driver/sqlite v1.5.5
+	gorm.io/gorm v1.25.10
 )
 
 require (
 	atomicgo.dev/cursor v0.2.0 // indirect
 	atomicgo.dev/keyboard v0.2.9 // indirect
 	atomicgo.dev/schedule v0.1.0 // indirect
-	github.com/alecthomas/kong v0.9.0 // indirect
-	github.com/alecthomas/kong-hcl v1.0.1 // indirect
-	github.com/alexflint/go-scalar v1.1.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/containerd/console v1.0.3 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
@@ -49,6 +50,4 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20230803162519-f966b187b2e5 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20230803162519-f966b187b2e5 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
-	gorm.io/driver/sqlite v1.5.5 // indirect
-	gorm.io/gorm v1.25.10 // indirect
 )
