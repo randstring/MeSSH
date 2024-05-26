@@ -35,6 +35,10 @@ _	"github.com/davecgh/go-spew/spew"
 _	"runtime/pprof"
 )
 
+const (
+	version = "MeSSH 0.6.6"
+)
+
 type host struct {
 	Addr	string
 	Port	int
@@ -46,6 +50,7 @@ type host struct {
 type Transfer struct {
 	from	string
 	to		string
+	prog	cel.Program
 }
 
 type job struct {
@@ -127,7 +132,6 @@ var global struct {
 	db			*gorm.DB
 	sessid		uint
 	paused		bool
-	version		string
 }
 
 type Config struct {
@@ -154,13 +158,14 @@ type Config struct {
 	Immed			string			`short:"i" aliases:"immediate" placeholder:"EXPR(res)string" help:"expression to print immediately for each result"`
 	Script			string			`short:"x" type:"existingfile" help:"script to upload and run on each host"`
 	Upload			struct	{
-		From		string			`short:"U" type:"existingfile" placeholder:"LOCAL" help:"local file to upload"`
+		From		string			`short:"U" type:"existingfile" placeholder:"LOCAL" help:"local path expression to upload"`
 		To			string			`aliases:"ut" placeholder:"REMOTE" help:"remote file path for upload"`
 	}								`embed prefix:"upload-"`
 	Download		struct	{
 		From		string			`short:"D" placeholder:"REMOTE" help:"remote file to download"`
 		To			string			`aliases:"dt" placeholder:"EXPR(res)string" help:"local path expression to download files to"`
 	}								`embed prefix:"download-"`
+	User			string			`short:"u" default:"root" help:"default user if not specified in hosts"`
 	Command			[]string		`arg optional help:"Command to run"`
 	Version			kong.VersionFlag`short:"V" set:"version=0" help:"display version"`
 }
@@ -241,7 +246,7 @@ func parseHost (line string) host {
 	if len(uhost) > 1 {
 		user, hst = uhost[0], uhost[1]
 	} else {
-		user = "root"
+		user = global.config.User
 		hst = fields[0]
 	}
 	hostaddr := strings.Split(hst, ":")
@@ -287,7 +292,7 @@ func header () {
 	if global.config.Bare {
 		return
 	}
-	logo, _ := pterm.DefaultBigText.WithLetters(putils.LettersFromStringWithStyle(global.version, pterm.FgYellow.ToStyle())).Srender()
+	logo, _ := pterm.DefaultBigText.WithLetters(putils.LettersFromStringWithStyle(version, pterm.FgYellow.ToStyle())).Srender()
 	pterm.Println(logo)
 	pterm.DefaultSection.Println("Session parameters")
 	pterm.Println(pterm.Yellow("* Date              	:"), pterm.Cyan(time.Now()))
@@ -450,6 +455,7 @@ func execute (host host, job job, knownHosts ssh.HostKeyCallback) (result) {
 	}
 	// downloads go last
 	if job.download != nil {
+		job.download.to = renderPath(job.download.prog, res)
 		res.Download = ssh.Download(job.download.from, job.download.to)
 	}
 
@@ -476,11 +482,24 @@ func updateStats (res result) {
 	global.session.Duration = time.Now().Sub(global.start)
 }
 
-func dial (job job) []result {
+func dial () []result {
 	var results []result
 	var prog cel.Program
+	job := job{cmd: global.config.Command}
 	if global.config.Immed != "" {
 		prog = getCEL(global.config.Immed, nil)
+	}
+	if global.config.Download.From != "" {
+		if global.config.Download.To == "" {
+			global.config.Download.To = fmt.Sprintf(`"%s"`, filepath.Base(global.config.Download.From))
+		}
+		job.download = &Transfer{from: global.config.Download.From, prog: getCEL(global.config.Download.To, nil)}
+	}
+	if global.config.Upload.From != "" {
+		if global.config.Upload.To == "" {
+			global.config.Upload.To = filepath.Base(global.config.Upload.From)
+		}
+		job.upload = &Transfer{from: global.config.Upload.From, to: global.config.Upload.To}
 	}
 	knownHosts, _ := goph.DefaultKnownHosts()
 	global.pool = gpool.NewPool(global.config.Parallelism)
@@ -498,6 +517,18 @@ func dial (job job) []result {
 	return results
 }
 
+func renderPath (prog cel.Program, res result) string {
+	val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config})
+	path := val.(string)
+	dir := filepath.Dir(path)
+	err := os.MkdirAll(dir, 0750)
+	if err != nil {
+		fmt.Println(err)
+		return ""
+	}
+	return path
+}
+
 func output (results []result) {
 	if global.config.Log.File == "" || global.config.Log.Template == "" {
 		return
@@ -508,6 +539,7 @@ func output (results []result) {
 	fileprog := getCEL(global.config.Log.File, nil)
 	filtprog := getCEL(global.config.Log.Template, nil)
 	for _, res := range results {
+//		renderPath(fileprog, res)
 		val := evalCEL(fileprog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config})
 		path := val.(string)
 		files[path] = append(files[path], formatRes(res, filtprog))
@@ -585,17 +617,16 @@ func dbOpen () {
 }
 
 func main () {
-	global.version = "MeSSH 0.6.4"
 	global.start = time.Now()
 
-	kong.Parse(&global.config, kong.Vars{"version": global.version}, kong.Configuration(konghcl.Loader, "messh.conf"))
+	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, "messh.conf"))
 	dbOpen()
 	global.hosts = prepareHosts(global.config.Hosts.File)
 
 	go kbd()
 	header()
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
-	results := dial(job{cmd: global.config.Command})
+	results := dial()
 /*
 	f, _ := os.Create("messh.prof")
 	if err := pprof.WriteHeapProfile(f); err != nil {
