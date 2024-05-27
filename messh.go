@@ -364,7 +364,7 @@ func formatRes (res result, prog cel.Program) string {
 		"Status":	"OK",
 		"Arrow"	:	color.GreenString("->"),
 	}
-	if res.Cmd != nil {
+	if res.SSH != nil || res.Cmd != nil {
 		extra["Status"] = "ERR"
 		extra["Arrow"] = color.RedString("=:")
 	}
@@ -400,7 +400,11 @@ func render (res result, prog cel.Program) {
 	if global.db != nil {
 		global.db.Create(&HostData{SessionID: global.sessid, Time: res.Time, Host: res.Host, Out: res.Out, Failed: res.Cmd != nil})
 	}
-	global.progress.UpdateTitle(fmt.Sprintf("%d/%d conns, %d OK, %d ERR, %s avg",
+	paused := ""
+	if global.paused {
+		paused = "[PAUSED]"
+	}
+	global.progress.UpdateTitle(fmt.Sprintf("%s %d/%d conns, %d OK, %d ERR, %s avg", paused,
 					global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg))
 	global.progress.Increment()
 }
