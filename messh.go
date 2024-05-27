@@ -42,8 +42,10 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.1"
+	version = "MeSSH 0.7.2"
 )
+
+var config = []string {"messh.conf", "~/.messh.conf"}
 
 type host struct {
 	Host	string
@@ -51,7 +53,7 @@ type host struct {
 	Port	int
 	User	string
 	Labels	[]string
-	stats	HostStats
+	Stats	HostStats
 }
 
 type Transfer struct {
@@ -187,6 +189,7 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("Config",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Session",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Hist",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("a",			cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("b",			cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Time",		types.DurationType),
@@ -289,7 +292,7 @@ func prepareHosts (path string) []host {
 			continue
 		}
 		hostent := parseHost(line)
-		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{}).(bool) {
+		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{"Config":global.config}).(bool) {
 			hosts = append(hosts, hostent)
 		}
 		// fetch from DB
@@ -357,7 +360,7 @@ func formatRes (res result, prog cel.Program) string {
 		extra["Arrow"] = color.RedString("=:")
 	}
 
-	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{})
+	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{"Config": global.config})
 	return line.(string)
 }
 
@@ -695,13 +698,13 @@ func dbOpen () {
 func main () {
 	global.start = time.Now()
 
-	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, "messh.conf"))
+	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, config...))
 	dbOpen()
 	global.hosts = prepareHosts(global.config.Hosts.File)
 
 	go kbd()
 	header()
-	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle("Mess SSH").WithMaxWidth(120).Start()
+	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle(version).WithMaxWidth(120).Start()
 	results := dial()
 /*
 	f, _ := os.Create("messh.prof")
