@@ -3,9 +3,12 @@ package main
 import (
 	"strings"
 	"os"
+	"io"
+	"net"
 	"fmt"
 	"time"
 	"sort"
+	"bytes"
 	"strconv"
 	"context"
 	"reflect"
@@ -15,6 +18,7 @@ import (
 _	"github.com/davecgh/go-spew/spew"
 	"github.com/melbahja/goph"
 	"golang.org/x/crypto/ssh"
+	"github.com/pkg/sftp"
 
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
@@ -29,6 +33,8 @@ _	"github.com/davecgh/go-spew/spew"
 	"github.com/google/cel-go/ext"
 	"github.com/mitchellh/mapstructure"
 
+	"github.com/alessio/shellescape"
+
 	"gorm.io/gorm"
 	"gorm.io/driver/sqlite"
 
@@ -36,10 +42,11 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.6.6"
+	version = "MeSSH 0.7.0"
 )
 
 type host struct {
+	Host	string
 	Addr	string
 	Port	int
 	User	string
@@ -55,6 +62,7 @@ type Transfer struct {
 
 type job struct {
 	cmd			[]string
+	script		string
 	combined	bool
 	download	*Transfer
 	upload		*Transfer
@@ -62,10 +70,10 @@ type job struct {
 
 type result struct {
 	Host		string
-//	exit		int
-//	stdout		string
-//	stderr		string
+	Exit		int
 	Out			string
+	Err			string
+	SSH			error
 	Cmd			error
 	Upload		error
 	Download	error
@@ -137,6 +145,7 @@ var global struct {
 type Config struct {
 	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
 	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
+	Combined		bool			`short:"C" negatable default:"true" help:"combine stdout and stderr in Out"`
 	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
 	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
 	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
@@ -183,12 +192,15 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("Time",		types.DurationType),
 			cel.Variable("Host",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
+			cel.Variable("Err",			cel.StringType),
 			cel.Variable("Cmd",			cel.StringType),
+			cel.Variable("SSH",			cel.StringType),
 			cel.Variable("Upload",		cel.StringType),
 			cel.Variable("Download",	cel.StringType),
 			cel.Variable("Host32",		cel.StringType),
 			cel.Variable("Arrow",		cel.StringType),
 			cel.Variable("Status",		cel.StringType),
+			cel.Variable("Exit",		cel.IntType),
 		)
 		if err != nil {
 			panic(err)
@@ -249,6 +261,7 @@ func parseHost (line string) host {
 		user = global.config.User
 		hst = fields[0]
 	}
+//	hst, port, err := net.SplitHostPort(hostaddr)
 	hostaddr := strings.Split(hst, ":")
 	if len(hostaddr) > 1 {
 		hst = hostaddr[0]
@@ -256,7 +269,7 @@ func parseHost (line string) host {
 	} else {
 		port = 22
 	}
-	return host{Addr: hst, User: user, Port: port, Labels: labels}
+	return host{Host: line, Addr: hst, User: user, Port: port, Labels: labels}
 }
 
 func prepareHosts (path string) []host {
@@ -397,30 +410,79 @@ func getAuth () func () goph.Auth {
 	}
 }
 
-func execute (host host, job job, knownHosts ssh.HostKeyCallback) (result) {
-	start := time.Now()
-	res := result{Host: host.Addr}
-
-	auth := getAuth()()
-	ssh, err := goph.NewConn(&goph.Config{Auth: auth, User: host.User, Addr: host.Addr, Port: uint(host.Port), Callback: knownHosts})
+func upload (ftp *sftp.Client, upload *Transfer) error {
+	local, err := os.Open(upload.from)
 	if err != nil {
-		fmt.Println(err)
+		return err
+	}
+	defer local.Close()
+
+	remote, err := ftp.Create(upload.to)
+	if err != nil {
+		return err
+	}
+	defer remote.Close()
+
+	_, err = io.Copy(remote, local)
+	return err
+}
+
+func download (ftp *sftp.Client, download *Transfer) error {
+	local, err := os.Create(download.to)
+	if err != nil {
+		return err
+	}
+	defer local.Close()
+
+	remote, err := ftp.Open(download.from)
+	if err != nil {
+		return err
+	}
+	defer remote.Close()
+
+	if _, err = io.Copy(local, remote); err != nil {
+		return err
+	}
+
+	return local.Sync()
+}
+
+func execute (host host, job job, knownhosts ssh.HostKeyCallback) result {
+	start := time.Now()
+	res := result{Host: host.Host}
+
+	// SSH client
+	client, err := ssh.Dial("tcp", net.JoinHostPort(host.Addr, fmt.Sprintf("%d", host.Port)), &ssh.ClientConfig{
+		User: host.User,
+		Auth: getAuth()(),
+		HostKeyCallback: knownhosts,
+		Timeout: global.config.Timeout,
+	})
+	if err != nil {
+		res.SSH = err
 		return res
 	}
+	defer client.Close()
 
-	// any uploads go first
-	if job.upload != nil {
-		res.Upload = ssh.Upload(job.upload.from, job.upload.to)
-	}
-	// script execution?
-	if global.config.Script != "" {
-		rnd := "/tmp/" + filepath.Base(global.config.Script) + "." + randstr.String(32)
-		err := ssh.Upload(global.config.Script, rnd)
+	// SFTP client
+	var ftp *sftp.Client
+	if job.upload != nil || job.download != nil || job.script != "" {
+		ftp, err = sftp.NewClient(client)
 		if err != nil {
-			res.Cmd = err
-			return res
+			res.Upload, res.Download = err, err
 		}
-		ftp, err := ssh.NewSftp()
+		defer ftp.Close()
+	}
+
+	// uploads go first
+	if job.upload != nil {
+		res.Upload = upload(ftp, job.upload)
+	}
+
+	// then commands
+	if job.script != "" {
+		rnd := "/tmp/" + filepath.Base(job.script) + "." + randstr.String(32)
+		err := upload(ftp, &Transfer{from: job.script, to: rnd})
 		if err != nil {
 			res.Cmd = err
 			return res
@@ -437,32 +499,46 @@ func execute (host host, job job, knownHosts ssh.HostKeyCallback) (result) {
 			job.cmd = []string{rnd}
 		}
 	}
-	if len(job.cmd) > 0 {
-		cmd, err := ssh.Command(job.cmd[0], job.cmd[1:]...)
-		if err != nil {
-			res.Cmd = err
-		} else {
-			if job.combined {
-				out, err := cmd.CombinedOutput()
-				res.Out = strings.TrimSuffix(string(out), "\n")
-				res.Cmd = err
-			} else {
-				out, err := cmd.CombinedOutput()
-				res.Out = strings.TrimSuffix(string(out), "\n")
-				res.Cmd = err
-			}
-		}
-	}
+	runCmd(client, job, &res)
+
 	// downloads go last
 	if job.download != nil {
 		job.download.to = renderPath(job.download.prog, res)
-		res.Download = ssh.Download(job.download.from, job.download.to)
+		res.Download = download(ftp, job.download)
 	}
 
 	end := time.Now()
 	res.Time = end.Sub(start)
 
 	return res
+}
+
+func runCmd (client *ssh.Client, job job, res *result) {
+	session, err := client.NewSession()
+	if err != nil {
+		res.SSH = err
+		return
+	}
+	defer session.Close()
+
+	cmd := shellescape.QuoteCommand(job.cmd)
+	if out := []byte{}; job.combined {
+		out, res.Cmd = session.CombinedOutput(cmd)
+		res.Out = strings.TrimSuffix(string(out), "\n")
+	} else {
+		var stdout, stderr bytes.Buffer
+		session.Stdout = &stdout
+		session.Stderr = &stderr
+		res.Cmd = session.Run(cmd)
+		res.Out = strings.TrimSuffix(string(stdout.Bytes()), "\n")
+		res.Err = strings.TrimSuffix(string(stderr.Bytes()), "\n")
+		if res.Cmd != nil {
+			switch errtype := res.Cmd.(type) {
+				case *ssh.ExitError:
+					res.Exit = errtype.Waitmsg.ExitStatus()
+			}
+		}
+	}
 }
 
 func updateStats (res result) {
@@ -485,7 +561,7 @@ func updateStats (res result) {
 func dial () []result {
 	var results []result
 	var prog cel.Program
-	job := job{cmd: global.config.Command}
+	job := job{cmd: global.config.Command, combined: global.config.Combined, script: global.config.Script}
 	if global.config.Immed != "" {
 		prog = getCEL(global.config.Immed, nil)
 	}
