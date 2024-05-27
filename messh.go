@@ -42,7 +42,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.0"
+	version = "MeSSH 0.7.1"
 )
 
 type host struct {
@@ -532,11 +532,11 @@ func runCmd (client *ssh.Client, job job, res *result) {
 		res.Cmd = session.Run(cmd)
 		res.Out = strings.TrimSuffix(string(stdout.Bytes()), "\n")
 		res.Err = strings.TrimSuffix(string(stderr.Bytes()), "\n")
-		if res.Cmd != nil {
-			switch errtype := res.Cmd.(type) {
-				case *ssh.ExitError:
-					res.Exit = errtype.Waitmsg.ExitStatus()
-			}
+	}
+	if res.Cmd != nil {
+		switch errtype := res.Cmd.(type) {
+			case *ssh.ExitError:
+				res.Exit = errtype.Waitmsg.ExitStatus()
 		}
 	}
 }
