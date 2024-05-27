@@ -149,7 +149,7 @@ type Config struct {
 	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
 	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
 	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
-	Parallelism		int				`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
+	Parallelism		uint			`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
 	Hosts			struct {
 		File		string			`short:"f" aliases:"read" required type:"existingfile" help:"hosts file"`
 		Filter		string			`placeholder:"EXPR(host)bool" help:"hosts filter expression"`
@@ -578,7 +578,7 @@ func dial () []result {
 		job.upload = &Transfer{from: global.config.Upload.From, to: global.config.Upload.To}
 	}
 	knownHosts, _ := goph.DefaultKnownHosts()
-	global.pool = gpool.NewPool(global.config.Parallelism)
+	global.pool = gpool.NewPool(int(global.config.Parallelism))
 	for _, host := range global.hosts {
 		host := host
 		global.pool.Enqueue(context.Background(), func() {
