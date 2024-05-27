@@ -42,7 +42,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.2"
+	version = "MeSSH 0.7.3"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -148,6 +148,8 @@ type Config struct {
 	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
 	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
 	Combined		bool			`short:"C" negatable default:"true" help:"combine stdout and stderr in Out"`
+	Header			string			`short:"H" help:"custom header expression"`
+	Summary			string			`short:"S" help:"custom summary expression"`
 	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
 	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
 	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
@@ -192,6 +194,7 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("Hist",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("a",			cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("b",			cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Hosts",		cel.ListType(cel.AnyType)),
 			cel.Variable("Time",		types.DurationType),
 			cel.Variable("Host",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
@@ -305,6 +308,11 @@ func prepareHosts (path string) []host {
 }
 
 func header () {
+	if global.config.Header != "" {
+		pterm.Println(evalCEL(getCEL(global.config.Header, nil), reflect.TypeOf("string"), []any{map[string]any{"Hosts":global.hosts}}, map[string]any{
+			"Config": global.config,
+		}).(string))
+	}
 	if global.config.Bare {
 		return
 	}
@@ -345,6 +353,7 @@ func order [T any] (expr string, list []T) {
 			"a": list[i],
 			"b": list[j],
 			"Config": global.config,
+			"Session": global.session,
 		}).(bool)
 	})
 }
@@ -360,7 +369,7 @@ func formatRes (res result, prog cel.Program) string {
 		extra["Arrow"] = color.RedString("=:")
 	}
 
-	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{"Config": global.config})
+	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{"Config": global.config, "Session": global.session})
 	return line.(string)
 }
 
@@ -597,7 +606,7 @@ func dial () []result {
 }
 
 func renderPath (prog cel.Program, res result) string {
-	val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config})
+	val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config, "Session": global.session})
 	path := val.(string)
 	dir := filepath.Dir(path)
 	err := os.MkdirAll(dir, 0750)
@@ -619,7 +628,7 @@ func output (results []result) {
 	filtprog := getCEL(global.config.Log.Template, nil)
 	for _, res := range results {
 //		renderPath(fileprog, res)
-		val := evalCEL(fileprog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config})
+		val := evalCEL(fileprog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config, "Session": global.session})
 		path := val.(string)
 		files[path] = append(files[path], formatRes(res, filtprog))
 	}
