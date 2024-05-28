@@ -631,20 +631,13 @@ func output (results []result) {
 	fileprog := getCEL(global.config.Log.File, nil)
 	filtprog := getCEL(global.config.Log.Template, nil)
 	for _, res := range results {
-//		renderPath(fileprog, res)
-		val := evalCEL(fileprog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config, "Session": global.session})
-		path := val.(string)
-		files[path] = append(files[path], formatRes(res, filtprog))
+		if lines := formatRes(res, filtprog); len(lines) > 0 {
+			path := renderPath(fileprog, res)
+			files[path] = append(files[path], lines)
+		}
 	}
 	for file, lines := range files {
-		dir := filepath.Dir(file)
-		err := os.MkdirAll(dir, 0750)
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-		err = os.WriteFile(file, []byte(strings.Join(lines, "\n")), 0660)
-		if err != nil {
+		if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")), 0660); err != nil {
 			fmt.Println(err)
 		}
 	}
