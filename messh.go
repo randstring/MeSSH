@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"time"
 	"sort"
+	"sync"
 	"bytes"
+	"errors"
 	"context"
 	"reflect"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"github.com/melbahja/goph"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"github.com/pkg/sftp"
 
 	"github.com/pterm/pterm"
@@ -55,6 +58,7 @@ type host struct {
 	User	string
 	Labels	[]string
 	Auth	[]ssh.AuthMethod
+	Known	ssh.HostKeyCallback
 	Stats	HostStats
 }
 
@@ -145,11 +149,18 @@ var global struct {
 	db			*gorm.DB
 	sessid		uint
 	paused		bool
+	known_hosts	struct {
+		strict	ssh.HostKeyCallback
+		add		ssh.HostKeyCallback
+		ignore	ssh.HostKeyCallback
+	}
 	auth		struct {
-		password	ssh.AuthMethod
-		keys		map[string]ssh.AuthMethod
+		prompt		sync.Mutex
+		keyring		agent.Agent
 		agent		ssh.AuthMethod
+		password	ssh.AuthMethod
 		kbi			ssh.AuthMethod
+		keys		map[string]ssh.AuthMethod
 		interactive	map[string] string
 		pwinput		string
 	}
@@ -274,6 +285,52 @@ func ssh_conf (alias string, key string) string {
 	return val
 }
 
+func prepareAuth() {
+	global.known_hosts.ignore = ssh.InsecureIgnoreHostKey()
+	normal, err := goph.DefaultKnownHosts()
+	if err != nil {
+		panic(err)
+		pterm.Warning.Println(err)
+	} else {
+		global.known_hosts.add = normal
+	}
+
+	var known_hosts []string
+	files := strings.Fields(ssh_conf("", "GlobalKnownHostsFile"))
+	files = append(files, strings.Fields(ssh_conf("", "UserKnownHostsFile"))...)
+	for _, file := range files {
+		if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+			known_hosts = append(known_hosts, file)
+		}
+	}
+	strict, err := knownhosts.New(known_hosts...)
+	if err != nil {
+		pterm.Warning.Println(err)
+	} else {
+		global.known_hosts.strict = strict
+	}
+
+	global.auth.password = ssh.PasswordCallback(func() (string, error) {
+		global.auth.prompt.Lock()
+		if global.auth.pwinput == "" {
+			global.auth.pwinput = prompt("Please enter a password as a last auth measure")
+		}
+		global.auth.prompt.Unlock()
+		return global.auth.pwinput, nil
+	})
+	global.auth.kbi = ssh.KeyboardInteractive(func(user, inst string, questions []string, echoes []bool) (answers []string, err error) {
+		global.auth.prompt.Lock()
+		for _, q := range questions {
+			if global.auth.interactive[q] == "" {
+				global.auth.interactive[q] = prompt(q)
+			}
+			answers = append(answers, global.auth.interactive[q])
+		}
+		global.auth.prompt.Lock()
+		return
+	})
+}
+
 func parseHost (line string) host {
 	var labels []string
 	line = strings.TrimSpace(line)
@@ -288,6 +345,17 @@ func parseHost (line string) host {
 	if addr == "" {
 		addr = alias
 	}
+	var known_hosts ssh.HostKeyCallback
+	switch ssh_conf(alias, "StrictHostKeyChecking") {
+	case "accept-new":
+fmt.Println("Accept new keys")
+		known_hosts = global.known_hosts.add
+	case "off", "no":
+		known_hosts = global.known_hosts.ignore
+	default:
+		known_hosts = global.known_hosts.strict
+	}
+spew.Dump(known_hosts)
 	return host{
 		Host: alias,
 		Labels: labels,
@@ -295,25 +363,8 @@ func parseHost (line string) host {
 		Addr: addr,
 		Port: ssh_conf(alias, "Port"),
 		Auth: sshAuth(alias),
+		Known: known_hosts,
 	}
-}
-
-func prepareAuth() {
-	global.auth.password = ssh.PasswordCallback(func() (string, error) {
-		if global.auth.pwinput == "" {
-			global.auth.pwinput = prompt("Please enter a password as a last auth measure")
-		}
-		return global.auth.pwinput, nil
-	})
-	global.auth.kbi = ssh.KeyboardInteractive(func(user, inst string, questions []string, echoes []bool) (answers []string, err error) {
-		for _, q := range questions {
-			if global.auth.interactive[q] == "" {
-				global.auth.interactive[q], _ = pterm.DefaultInteractiveTextInput.WithMask("*").Show(q)
-			}
-			answers = append(answers, global.auth.interactive[q])
-		}
-		return
-	})
 }
 
 func prepareHosts (path string) []host {
@@ -333,7 +384,7 @@ func prepareHosts (path string) []host {
 			continue
 		}
 		hostent := parseHost(line)
-fmt.Println(hostent)
+//fmt.Println(hostent)
 		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{"Config":global.config}).(bool) {
 			hosts = append(hosts, hostent)
 		}
@@ -459,9 +510,9 @@ func sshAuth (alias string) (auth []ssh.AuthMethod) {
 	auth_order := strings.Split(ssh_conf(alias, "PreferredAuthentications"), ",")
 	for _, method := range auth_order {
 		switch method {
-		case "pubickey":
+		case "publickey":
 			if ssh_conf(alias, "PubkeyAuthentication") != "no" {
-				keyfiles := ssh_config.GetAll(alias, "IdentityFile")
+				keyfiles, _ := global.ssh_config.GetAll(alias, "IdentityFile")
 				for _, file := range keyfiles {
 					if _, ok := global.auth.keys[file]; !ok && global.auth.keys[file] == nil {
 						if global.auth.keys == nil {
@@ -487,22 +538,25 @@ func sshAuth (alias string) (auth []ssh.AuthMethod) {
 					}
 				}
 			}
-			if ssh_conf(alias, "PubkeyAuthentication") != "no"  && ssh_conf(alias, "IdentitiesOnly") == "no" {
+			if ssh_conf(alias, "PubkeyAuthentication") != "no" && ssh_conf(alias, "IdentitiesOnly") != "yes" {
 				if global.auth.agent == nil {
 					if as, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
-						global.auth.agent = ssh.PublicKeysCallback(agent.NewClient(as).Signers)
+						global.auth.keyring = agent.NewClient(as)
+						global.auth.agent = ssh.PublicKeysCallback(global.auth.keyring.Signers)
 					}
 				}
 				if global.auth.agent != nil {
 					auth = append(auth, global.auth.agent)
 				}
 			}
-		case "keybord-interactive":
+		case "keyboard-interactive":
 			if ssh_conf(alias, "KbdInteractiveAuthentication") != "no" {
 				auth = append(auth, global.auth.kbi)
 			}
 		case "password":
-			if ssh_conf(alias, "PasswordAuthentication") != "no" {
+			if pass := ssh_conf(alias, "Password"); pass != "" {
+				auth = append(auth, ssh.Password(pass))
+			} else if ssh_conf(alias, "PasswordAuthentication") != "no" {
 				auth = append(auth, global.auth.password)
 			}
 		}
@@ -510,23 +564,6 @@ func sshAuth (alias string) (auth []ssh.AuthMethod) {
 spew.Dump(auth)
 
 	return
-}
-
-func getAuth () func () goph.Auth {
-	var auth *goph.Auth
-
-	return func() goph.Auth {
-		if auth != nil {
-			return *auth
-		}
-
-		newauth, err := goph.Key("/home/dimitral/.ssh/rsa", "")
-		if err != nil {
-			panic(err)
-		}
-		auth = &newauth
-		return newauth
-	}
 }
 
 func upload (ftp *sftp.Client, upload *Transfer) error {
@@ -566,24 +603,27 @@ func download (ftp *sftp.Client, download *Transfer) error {
 	return local.Sync()
 }
 
-func execute (host host, job job, knownhosts ssh.HostKeyCallback) result {
+func execute (host host, job job) result {
 	start := time.Now()
 	res := result{Host: host.Host}
 
 	// SSH client
-	fmt.Println("Config", ssh_config.Get(host.Host, "IdentitiesOnly"))
+//	fmt.Println("Config", ssh_config.Get(host.Host, "PubkeyAuthentication"))
 	client, err := ssh.Dial("tcp", net.JoinHostPort(host.Addr, host.Port), &ssh.ClientConfig{
 		User: host.User,
 		Auth: host.Auth,
-		HostKeyCallback: knownhosts,
+		HostKeyCallback: host.Known,
 		Timeout: global.config.Timeout,
 	})
 	if err != nil {
-		pterm.Error.Println(err)
+		pterm.Error.Println(err, host.Host)
 		res.SSH = err
 		return res
 	}
 	defer client.Close()
+	if global.auth.keyring != nil && ssh_conf(host.Host, "ForwardAgent") != "no" {
+		agent.ForwardToAgent(client, global.auth.keyring)
+	}
 
 	// SFTP client
 	var ftp *sftp.Client
@@ -641,6 +681,7 @@ func runCmd (client *ssh.Client, job job, res *result) {
 		return
 	}
 	defer session.Close()
+	agent.RequestAgentForwarding(session)
 
 	cmd := shellescape.QuoteCommand(job.cmd)
 	if out := []byte{}; job.combined {
@@ -698,13 +739,12 @@ func dial () []result {
 		}
 		job.upload = &Transfer{from: global.config.Upload.From, to: global.config.Upload.To}
 	}
-	knownHosts, _ := goph.DefaultKnownHosts()
 	global.pool = gpool.NewPool(int(global.config.Parallelism))
 	for _, host := range global.hosts {
 		host := host
 		global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
-			result := execute(host, job, knownHosts)
+			result := execute(host, job)
 			render(result, prog)
 			results = append(results, result)
 		})
@@ -720,7 +760,7 @@ func renderPath (prog cel.Program, res result) string {
 	dir := filepath.Dir(path)
 	err := os.MkdirAll(dir, 0750)
 	if err != nil {
-		fmt.Println(err)
+		pterm.Warning.Println(err)
 		return ""
 	}
 	return path
@@ -743,7 +783,7 @@ func output (results []result) {
 	}
 	for file, lines := range files {
 		if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")), 0660); err != nil {
-			fmt.Println(err)
+			pterm.Warning.Println(err)
 		}
 	}
 }
