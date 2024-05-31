@@ -9,15 +9,16 @@ import (
 	"time"
 	"sort"
 	"bytes"
-	"strconv"
 	"context"
 	"reflect"
 	"path/filepath"
 	"github.com/fatih/color"
 	"github.com/sherifabdlnaby/gpool"
-_	"github.com/davecgh/go-spew/spew"
+	"github.com/davecgh/go-spew/spew"
+	"github.com/kevinburke/ssh_config"
 	"github.com/melbahja/goph"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"github.com/pkg/sftp"
 
 	"github.com/pterm/pterm"
@@ -42,7 +43,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.3"
+	version = "MeSSH 0.7.4"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -50,9 +51,10 @@ var config = []string {"messh.conf", "~/.messh.conf"}
 type host struct {
 	Host	string
 	Addr	string
-	Port	int
+	Port	string
 	User	string
 	Labels	[]string
+	Auth	[]ssh.AuthMethod
 	Stats	HostStats
 }
 
@@ -137,11 +139,20 @@ var global struct {
 	hosts		[]host
 	results		[]result
 	start		time.Time
+	ssh_config	*ssh_config.Config
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
 	db			*gorm.DB
 	sessid		uint
 	paused		bool
+	auth		struct {
+		password	ssh.AuthMethod
+		keys		map[string]ssh.AuthMethod
+		agent		ssh.AuthMethod
+		kbi			ssh.AuthMethod
+		interactive	map[string] string
+		pwinput		string
+	}
 }
 
 type Config struct {
@@ -149,7 +160,7 @@ type Config struct {
 	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
 	Combined		bool			`short:"C" negatable default:"true" help:"combine stdout and stderr in Out"`
 	Header			string			`short:"H" help:"custom header expression"`
-	Summary			string			`short:"S" help:"custom summary expression"`
+	Summary			string			`short:"Z" help:"custom summary expression"`
 	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
 	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
 	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
@@ -178,7 +189,13 @@ type Config struct {
 		From		string			`short:"D" placeholder:"REMOTE" help:"remote file to download"`
 		To			string			`aliases:"dt" placeholder:"EXPR(res)string" help:"local path expression to download files to"`
 	}								`embed prefix:"download-"`
-	User			string			`short:"u" default:"root" help:"default user if not specified in hosts"`
+	SSH				[]byte			`short:"S" name:"ssh-config" type:"filecontent" default:"~/.ssh/config" help:"path to SSH config for host/auth configuration"`
+	Auth			struct {
+		User			string			`short:"u" default:"root" help:"default user if not specified in hosts"`
+		Password		string			`short:"P" help:"SSH password to use when connecting"`
+		Key				string			`short:"K" placeholder:"KEY[:pass]" help:"SSH key for authentication, has precedence over password"`
+		Agent			bool			`negatable default:"true" help:"allow using SSH agent for authentication"`
+	}								`embed prefix:"auth-"`
 	Command			[]string		`arg optional help:"Command to run"`
 	Version			kong.VersionFlag`short:"V" set:"version=0" help:"display version"`
 }
@@ -249,9 +266,15 @@ func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string
 	panic("failed to convert expression to wanted type")
 }
 
+func ssh_conf (alias string, key string) string {
+	val, _ := global.ssh_config.Get(alias, key)
+	if val == "" {
+		val = ssh_config.Default(key)
+	}
+	return val
+}
+
 func parseHost (line string) host {
-	var port int
-	var user, hst string
 	var labels []string
 	line = strings.TrimSpace(line)
 	fields := strings.Fields(line)
@@ -260,22 +283,37 @@ func parseHost (line string) host {
 	} else if len(fields) > 1 {
 		labels = strings.Split(fields[1], ",")
 	}
-	uhost := strings.Split(fields[0], "@")
-	if len(uhost) > 1 {
-		user, hst = uhost[0], uhost[1]
-	} else {
-		user = global.config.User
-		hst = fields[0]
+	alias := fields[0]
+	addr := ssh_conf(alias, "HostName")
+	if addr == "" {
+		addr = alias
 	}
-//	hst, port, err := net.SplitHostPort(hostaddr)
-	hostaddr := strings.Split(hst, ":")
-	if len(hostaddr) > 1 {
-		hst = hostaddr[0]
-		port, _ = strconv.Atoi(hostaddr[1])
-	} else {
-		port = 22
+	return host{
+		Host: alias,
+		Labels: labels,
+		User: ssh_conf(alias, "User"),
+		Addr: addr,
+		Port: ssh_conf(alias, "Port"),
+		Auth: sshAuth(alias),
 	}
-	return host{Host: line, Addr: hst, User: user, Port: port, Labels: labels}
+}
+
+func prepareAuth() {
+	global.auth.password = ssh.PasswordCallback(func() (string, error) {
+		if global.auth.pwinput == "" {
+			global.auth.pwinput = prompt("Please enter a password as a last auth measure")
+		}
+		return global.auth.pwinput, nil
+	})
+	global.auth.kbi = ssh.KeyboardInteractive(func(user, inst string, questions []string, echoes []bool) (answers []string, err error) {
+		for _, q := range questions {
+			if global.auth.interactive[q] == "" {
+				global.auth.interactive[q], _ = pterm.DefaultInteractiveTextInput.WithMask("*").Show(q)
+			}
+			answers = append(answers, global.auth.interactive[q])
+		}
+		return
+	})
 }
 
 func prepareHosts (path string) []host {
@@ -295,6 +333,7 @@ func prepareHosts (path string) []host {
 			continue
 		}
 		hostent := parseHost(line)
+fmt.Println(hostent)
 		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{"Config":global.config}).(bool) {
 			hosts = append(hosts, hostent)
 		}
@@ -409,6 +448,70 @@ func render (res result, prog cel.Program) {
 	global.progress.Increment()
 }
 
+func prompt (msg string) (string) {
+	global.progress.WithRemoveWhenDone(true).Stop()
+	pass, _ := pterm.DefaultInteractiveTextInput.WithMask("*").Show(msg)
+	global.progress.WithRemoveWhenDone(false).Start()
+	return pass
+}
+
+func sshAuth (alias string) (auth []ssh.AuthMethod) {
+	auth_order := strings.Split(ssh_conf(alias, "PreferredAuthentications"), ",")
+	for _, method := range auth_order {
+		switch method {
+		case "pubickey":
+			if ssh_conf(alias, "PubkeyAuthentication") != "no" {
+				keyfiles := ssh_config.GetAll(alias, "IdentityFile")
+				for _, file := range keyfiles {
+					if _, ok := global.auth.keys[file]; !ok && global.auth.keys[file] == nil {
+						if global.auth.keys == nil {
+							global.auth.keys = make(map[string]ssh.AuthMethod)
+						}
+						global.auth.keys[file] = nil
+						pk, err := os.ReadFile(file)
+						if err != nil {
+							pterm.Warning.Println(err)
+							continue
+						}				
+						signer, err := ssh.ParsePrivateKey(pk)
+						if _, ok := err.(*ssh.PassphraseMissingError); ok {
+							pass, _ := pterm.DefaultInteractiveTextInput.WithMask("*").Show("Enter a password for ssh key "+file)
+							signer, err = ssh.ParsePrivateKeyWithPassphrase(pk, []byte(pass))
+						}
+						if err == nil {
+							global.auth.keys[file] = ssh.PublicKeys(signer)
+						}
+					}
+					if global.auth.keys[file] != nil {
+						auth = append(auth, global.auth.keys[file])
+					}
+				}
+			}
+			if ssh_conf(alias, "PubkeyAuthentication") != "no"  && ssh_conf(alias, "IdentitiesOnly") == "no" {
+				if global.auth.agent == nil {
+					if as, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
+						global.auth.agent = ssh.PublicKeysCallback(agent.NewClient(as).Signers)
+					}
+				}
+				if global.auth.agent != nil {
+					auth = append(auth, global.auth.agent)
+				}
+			}
+		case "keybord-interactive":
+			if ssh_conf(alias, "KbdInteractiveAuthentication") != "no" {
+				auth = append(auth, global.auth.kbi)
+			}
+		case "password":
+			if ssh_conf(alias, "PasswordAuthentication") != "no" {
+				auth = append(auth, global.auth.password)
+			}
+		}
+	}
+spew.Dump(auth)
+
+	return
+}
+
 func getAuth () func () goph.Auth {
 	var auth *goph.Auth
 
@@ -468,13 +571,15 @@ func execute (host host, job job, knownhosts ssh.HostKeyCallback) result {
 	res := result{Host: host.Host}
 
 	// SSH client
-	client, err := ssh.Dial("tcp", net.JoinHostPort(host.Addr, fmt.Sprintf("%d", host.Port)), &ssh.ClientConfig{
+	fmt.Println("Config", ssh_config.Get(host.Host, "IdentitiesOnly"))
+	client, err := ssh.Dial("tcp", net.JoinHostPort(host.Addr, host.Port), &ssh.ClientConfig{
 		User: host.User,
-		Auth: getAuth()(),
+		Auth: host.Auth,
 		HostKeyCallback: knownhosts,
 		Timeout: global.config.Timeout,
 	})
 	if err != nil {
+		pterm.Error.Println(err)
 		res.SSH = err
 		return res
 	}
@@ -705,9 +810,15 @@ func main () {
 	global.start = time.Now()
 
 	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, config...))
+	ssh_config, err := ssh_config.DecodeBytes(global.config.SSH)
+	if err != nil {
+		panic(err)
+	}
+	global.ssh_config = ssh_config
 	dbOpen()
+	prepareAuth()
 	global.hosts = prepareHosts(global.config.Hosts.File)
-
+//os.Exit(2)
 	go kbd()
 	header()
 	global.progress, _ = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle(version).WithMaxWidth(120).Start()
