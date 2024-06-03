@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"github.com/fatih/color"
 	"github.com/sherifabdlnaby/gpool"
-	"github.com/davecgh/go-spew/spew"
+_	"github.com/davecgh/go-spew/spew"
 	"github.com/kevinburke/ssh_config"
 	"github.com/melbahja/goph"
 	"golang.org/x/crypto/ssh"
@@ -56,7 +56,6 @@ type host struct {
 	Host	string
 	Addr	string
 	Port	string
-	User	string
 	Labels	[]string
 	SSH		ssh.ClientConfig
 	Stats	HostStats
@@ -462,14 +461,13 @@ func hostConfig (line string) host {
 	return host{
 		Host: alias,
 		Labels: labels,
-		User: ssh_conf(alias, "User"),
 		Addr: addr,
 		Port: ssh_conf(alias, "Port"),
 		SSH: ssh.ClientConfig{
 			User: ssh_conf(alias, "User"),
 			Auth: hostAuthMethods(alias),
 			HostKeyCallback: known_hosts,
-			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKeyAlgorithms"), ","),
+//			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKeyAlgorithms"), ","),
 			Timeout: tout,
 		},
 	}
@@ -560,8 +558,9 @@ func progressTitle () {
 	if global.paused {
 		paused = "[PAUSED]"
 	}
-	global.progress.UpdateTitle(fmt.Sprintf("%s %d/%d conns, %d OK, %d ERR, %s avg",
+	global.progress.UpdateTitle(fmt.Sprintf("%s %d/%d conns, %d OK, %d ERR, %s avg; ETA: %s",
 		paused, global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg,
+		(global.session.Duration/time.Duration(global.session.Count)) * time.Duration(len(global.hosts) - global.session.Count),
 	))
 }
 
@@ -667,15 +666,9 @@ func execJob (host host, job job) result {
 	res := result{Host: host.Host}
 
 	// SSH client
-//	fmt.Println("Config", ssh_config.Get(host.Host, "PubkeyAuthentication"))
-	client, err := ssh.Dial("tcp", net.JoinHostPort(host.Addr, host.Port), &host.SSH) /* &ssh.ClientConfig{
-		User: host.User,
-		Auth: host.Auth,
-		HostKeyCallback: host.Known,
-		Timeout: global.config.Timeout,
-	}) */
+	client, err := ssh.Dial("tcp", net.JoinHostPort(host.Addr, host.Port), &host.SSH)
 	if err != nil {
-		pterm.Error.Println(err, host.Host)
+		pterm.Error.Println(host.Host, err)
 		res.SSH = err
 		return res
 	}
@@ -755,13 +748,12 @@ func parallelExec () []result {
 	global.pool = gpool.NewPool(int(global.config.Parallelism))
 	for _, host := range global.hosts {
 		host := host
-		err := global.pool.Enqueue(context.Background(), func() {
+		global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
 			result := execJob(host, job)
 			renderRes(result, prog)
 			results = append(results, result)
 		})
-		pterm.Info.Println(err)
 		for global.paused {
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -792,7 +784,6 @@ func logToFiles (results []result) {
 		}
 	}
 }
-
 
 func dbOpen () {
 	if global.config.Database == "" {
@@ -844,7 +835,7 @@ func printSummary (results []result) {
 	}
 	pterm.DefaultSection.Println("Session summary")
 	pterm.Println(pterm.Yellow("* Date                  :"), pterm.Cyan(time.Now()))
-	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(global.session.Total))
+	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(global.session.Duration))
 	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(global.session.Avg))
 	pterm.Println(pterm.Yellow("* Min(t) per host       :"), pterm.Cyan(global.session.Min))
 	pterm.Println(pterm.Yellow("* Max(t) per host       :"), pterm.Cyan(global.session.Max))
@@ -863,12 +854,11 @@ func kbdHandler () {
 			panic(err)
 		}
 		if key == keyboard.KeyCtrlC {
-			if global.paused {
-				os.Exit(0)
-			}
-			global.paused = true
 			global.progress.Stop()
+			pterm.Info.Println("Waiting for active connections to complete. Ctrl-C again to quit immediately")
 			go global.pool.Stop()
+			for _, key, _ := keyboard.GetKey(); key != keyboard.KeyCtrlC; {}
+			os.Exit(0)
 		} else if key == keyboard.KeySpace && !global.paused {
 			global.paused = true
 			progressTitle()
