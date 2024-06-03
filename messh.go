@@ -47,7 +47,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.5"
+	version = "MeSSH 0.7.7"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -80,9 +80,9 @@ type job struct {
 
 type result struct {
 	Host		string
-	Exit		int
 	Out			string
 	Err			string
+	Exit		int
 	SSH			error
 	Cmd			error
 	Upload		error
@@ -519,6 +519,16 @@ func display(results []result) {
 	}
 }
 
+func progressTitle () {
+	paused := ""
+	if global.paused {
+		paused = "[PAUSED]"
+	}
+	global.progress.UpdateTitle(fmt.Sprintf("%s %d/%d conns, %d OK, %d ERR, %s avg",
+		paused, global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg,
+	))
+}
+
 func render (res result, prog cel.Program) {
 	updateStats(res)
 	if prog != nil {
@@ -527,12 +537,7 @@ func render (res result, prog cel.Program) {
 	if global.db != nil {
 		global.db.Create(&HostData{SessionID: global.sessid, Time: res.Time, Host: res.Host, Out: res.Out, Failed: res.Cmd != nil})
 	}
-	paused := ""
-	if global.paused {
-		paused = "[PAUSED]"
-	}
-	global.progress.UpdateTitle(fmt.Sprintf("%s %d/%d conns, %d OK, %d ERR, %s avg", paused,
-					global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg))
+	progressTitle()
 	global.progress.Increment()
 }
 
@@ -743,7 +748,7 @@ func runCmd (client *ssh.Client, job job, res *result) {
 
 func updateStats (res result) {
 	global.session.Count++
-	if res.Cmd == nil {
+	if res.SSH == nil && res.Cmd == nil {
 		global.session.Ok++
 	} else {
 		global.session.Err++
@@ -780,12 +785,16 @@ func dial () []result {
 	global.pool = gpool.NewPool(int(global.config.Parallelism))
 	for _, host := range global.hosts {
 		host := host
-		global.pool.Enqueue(context.Background(), func() {
+		err := global.pool.Enqueue(context.Background(), func() {
 			time.Sleep(global.config.Delay)
 			result := execute(host, job)
 			render(result, prog)
 			results = append(results, result)
 		})
+		pterm.Info.Println(err)
+		for global.paused {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 	global.pool.Stop()
 
@@ -836,6 +845,7 @@ func kbd () {
 			panic(err)
 		}
 		if key == keyboard.KeyCtrlC {
+			global.progress.Stop()
 			os.Exit(0)
 			global.pool.Stop()
 			pterm.DefaultInteractiveConfirm.WithDefaultText("Abort?").Show()
@@ -844,7 +854,7 @@ func kbd () {
 			global.paused = true
 			global.progress.UpdateTitle("[PAUSED] " + global.progress.Title)
 //			global.progress.Stop()
-			global.pool.Stop()
+//			global.pool.Stop()
 		} else if key == keyboard.KeyEnter && global.paused {
 			global.paused = false
 			global.progress.UpdateTitle(strings.TrimPrefix(global.progress.Title, "[PAUSED] "))
