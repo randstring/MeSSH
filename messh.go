@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"github.com/fatih/color"
 	"github.com/sherifabdlnaby/gpool"
-_	"github.com/davecgh/go-spew/spew"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/kevinburke/ssh_config"
 	"github.com/melbahja/goph"
 	"golang.org/x/crypto/ssh"
@@ -58,10 +58,6 @@ type host struct {
 	Port	string
 	User	string
 	Labels	[]string
-/*
-	Auth	[]ssh.AuthMethod
-	Known	ssh.HostKeyCallback
-*/
 	SSH		ssh.ClientConfig
 	Stats	HostStats
 }
@@ -469,13 +465,11 @@ func hostConfig (line string) host {
 		User: ssh_conf(alias, "User"),
 		Addr: addr,
 		Port: ssh_conf(alias, "Port"),
-//		Auth: hostAuthMethods(alias),
-//		Known: known_hosts,
 		SSH: ssh.ClientConfig{
 			User: ssh_conf(alias, "User"),
 			Auth: hostAuthMethods(alias),
 			HostKeyCallback: known_hosts,
-			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKyAlgorithms"), ","),
+			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKeyAlgorithms"), ","),
 			Timeout: tout,
 		},
 	}
