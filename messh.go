@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"github.com/fatih/color"
 	"github.com/sherifabdlnaby/gpool"
-	"github.com/davecgh/go-spew/spew"
+_	"github.com/davecgh/go-spew/spew"
 	"github.com/kevinburke/ssh_config"
 	"github.com/melbahja/goph"
 	"golang.org/x/crypto/ssh"
@@ -31,6 +31,7 @@ import (
 	"github.com/alecthomas/kong-hcl"
 
 	"github.com/thanhpk/randstr"
+	"github.com/jychri/tilde"
 
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/cel"
@@ -46,7 +47,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.4"
+	version = "MeSSH 0.7.5"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -59,6 +60,7 @@ type host struct {
 	Labels	[]string
 	Auth	[]ssh.AuthMethod
 	Known	ssh.HostKeyCallback
+	SSH		ssh.ClientConfig
 	Stats	HostStats
 }
 
@@ -152,6 +154,7 @@ var global struct {
 	known_hosts	struct {
 		strict	ssh.HostKeyCallback
 		add		ssh.HostKeyCallback
+		replace	ssh.HostKeyCallback
 		ignore	ssh.HostKeyCallback
 	}
 	auth		struct {
@@ -277,6 +280,28 @@ func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string
 	panic("failed to convert expression to wanted type")
 }
 
+func hostkey_cb (hostname string, remote net.Addr, key ssh.PublicKey, replace bool) error {
+	if global.known_hosts.strict == nil {
+		return errors.New("No strict host checking callback.")
+	}
+	err := global.known_hosts.strict(hostname, remote, key)
+	if err == nil {
+		return nil
+	}
+
+	var keyErr *knownhosts.KeyError
+	if !replace && errors.As(err, &keyErr) && len(keyErr.Want) > 0 {
+		return err
+	}
+
+	err = goph.AddKnownHost(hostname, remote, key, "")
+	if (err != nil) {
+		pterm.Warning.Println(err)
+	}
+
+	return nil
+}
+
 func ssh_conf (alias string, key string) string {
 	val, _ := global.ssh_config.Get(alias, key)
 	if val == "" {
@@ -287,22 +312,23 @@ func ssh_conf (alias string, key string) string {
 
 func prepareAuth() {
 	global.known_hosts.ignore = ssh.InsecureIgnoreHostKey()
-	normal, err := goph.DefaultKnownHosts()
-	if err != nil {
-		panic(err)
-		pterm.Warning.Println(err)
-	} else {
-		global.known_hosts.add = normal
+	global.known_hosts.add = func (hostname string, remote net.Addr, key ssh.PublicKey) error {
+		return hostkey_cb(hostname, remote, key, false)
+	}
+	global.known_hosts.replace = func (hostname string, remote net.Addr, key ssh.PublicKey) error {
+		return hostkey_cb(hostname, remote, key, true)
 	}
 
 	var known_hosts []string
 	files := strings.Fields(ssh_conf("", "GlobalKnownHostsFile"))
 	files = append(files, strings.Fields(ssh_conf("", "UserKnownHostsFile"))...)
 	for _, file := range files {
+		file = tilde.Abs(file)
 		if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
 			known_hosts = append(known_hosts, file)
 		}
 	}
+	pterm.Debug.Println(known_hosts)
 	strict, err := knownhosts.New(known_hosts...)
 	if err != nil {
 		pterm.Warning.Println(err)
@@ -347,15 +373,19 @@ func parseHost (line string) host {
 	}
 	var known_hosts ssh.HostKeyCallback
 	switch ssh_conf(alias, "StrictHostKeyChecking") {
-	case "accept-new":
-fmt.Println("Accept new keys")
-		known_hosts = global.known_hosts.add
-	case "off", "no":
-		known_hosts = global.known_hosts.ignore
-	default:
-		known_hosts = global.known_hosts.strict
+		case "accept-new":
+			known_hosts = global.known_hosts.add
+		case "no":
+			known_hosts = global.known_hosts.replace
+		case "off":
+			known_hosts = global.known_hosts.ignore
+		default:
+			known_hosts = global.known_hosts.strict
 	}
-spew.Dump(known_hosts)
+	tout, err := time.ParseDuration(ssh_conf(alias, "ConnectTimeout"))
+	if err != nil {
+		tout = global.config.Timeout
+	}
 	return host{
 		Host: alias,
 		Labels: labels,
@@ -364,6 +394,13 @@ spew.Dump(known_hosts)
 		Port: ssh_conf(alias, "Port"),
 		Auth: sshAuth(alias),
 		Known: known_hosts,
+		SSH: ssh.ClientConfig{
+			User: ssh_conf(alias, "User"),
+			Auth: sshAuth(alias),
+			HostKeyCallback: known_hosts,
+			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKyAlgorithms"), ","),
+			Timeout: tout,
+		},
 	}
 }
 
@@ -514,6 +551,7 @@ func sshAuth (alias string) (auth []ssh.AuthMethod) {
 			if ssh_conf(alias, "PubkeyAuthentication") != "no" {
 				keyfiles, _ := global.ssh_config.GetAll(alias, "IdentityFile")
 				for _, file := range keyfiles {
+					file = tilde.Abs(file)
 					if _, ok := global.auth.keys[file]; !ok && global.auth.keys[file] == nil {
 						if global.auth.keys == nil {
 							global.auth.keys = make(map[string]ssh.AuthMethod)
@@ -561,7 +599,7 @@ func sshAuth (alias string) (auth []ssh.AuthMethod) {
 			}
 		}
 	}
-spew.Dump(auth)
+//spew.Dump(auth)
 
 	return
 }
