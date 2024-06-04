@@ -47,7 +47,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.8"
+	version = "MeSSH 0.7.9"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -149,6 +149,8 @@ var global struct {
 	sessid		uint
 	paused		bool
 	stopping	bool
+	cancel		context.CancelFunc
+	pause		sync.Mutex
 	known_hosts	struct {
 		strict	ssh.HostKeyCallback
 		add		ssh.HostKeyCallback
@@ -565,9 +567,12 @@ func progressUpdate (incr int) {
 	if incr > 0 {
 		global.progress.Add(incr)
 	}
+	var est time.Duration
+	if global.session.Count > 0 {
+		est = (global.session.Duration/time.Duration(global.session.Count)) * time.Duration(len(global.hosts) - global.session.Count)
+	}
 	global.progress.UpdateTitle(fmt.Sprintf("%s %s %d/%d conns, %d OK, %d ERR, %s avg; ETA: %s", version,
-		paused, global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg,
-		(global.session.Duration/time.Duration(global.session.Count)) * time.Duration(len(global.hosts) - global.session.Count),
+		paused, global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg, est,
 	))
 }
 
@@ -752,17 +757,21 @@ func parallelExec () []result {
 		job.upload = &Transfer{from: global.config.Upload.From, to: global.config.Upload.To}
 	}
 	global.pool = gpool.NewPool(int(global.config.Parallelism))
+	ctx, cancel := context.WithCancel(context.Background())
+	global.cancel = cancel
 	for _, host := range global.hosts {
 		host := host
-		global.pool.Enqueue(context.Background(), func() {
+		global.pool.Enqueue(ctx, func() {
 			time.Sleep(global.config.Delay)
 			result := execJob(host, job)
 			renderRes(result, prog)
 			results = append(results, result)
 		})
-		for global.paused {
-			time.Sleep(100 * time.Millisecond)
-		}
+		global.pause.Lock()
+		global.pause.Unlock()
+//		for global.paused {
+//			time.Sleep(100 * time.Millisecond)
+//		}
 	}
 	global.pool.Stop()
 
@@ -840,6 +849,9 @@ func printSummary (results []result) {
 		return
 	}
 	pterm.DefaultSection.Println("Session summary")
+	if global.stopping {
+		pterm.Warning.Println("Session interrupted before completion")
+	}
 	pterm.Println(pterm.Yellow("* Date                  :"), pterm.Cyan(time.Now()))
 	pterm.Println(pterm.Yellow("* Total runtime         :"), pterm.Cyan(global.session.Duration))
 	pterm.Println(pterm.Yellow("* Avg(t) per host       :"), pterm.Cyan(global.session.Avg))
@@ -867,11 +879,14 @@ func kbdHandler () {
 			pterm.Info.Println("Waiting for active connections to complete. Ctrl-c again to quit immediately")
 			global.progress.WithRemoveWhenDone(true).Stop()
 			go global.pool.Stop()
+			global.cancel()
 		} else if key == keyboard.KeySpace && !global.paused {
 			global.paused = true
+			global.pause.Lock()
 			progressUpdate(0)
 		} else if key == keyboard.KeyEnter && global.paused {
 			global.paused = false
+			global.pause.Unlock()
 			progressUpdate(0)
 		} else if char == '+' {
 			global.pool.Resize(global.pool.GetSize() + 1)
