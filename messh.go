@@ -47,7 +47,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.7"
+	version = "MeSSH 0.7.8"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -148,6 +148,7 @@ var global struct {
 	db			*gorm.DB
 	sessid		uint
 	paused		bool
+	stopping	bool
 	known_hosts	struct {
 		strict	ssh.HostKeyCallback
 		add		ssh.HostKeyCallback
@@ -553,12 +554,18 @@ func printToScreen(results []result) {
 	}
 }
 
-func progressTitle () {
+func progressUpdate (incr int) {
+	if global.stopping {
+		return
+	}
 	paused := ""
 	if global.paused {
 		paused = "[PAUSED]"
 	}
-	global.progress.UpdateTitle(fmt.Sprintf("%s %d/%d conns, %d OK, %d ERR, %s avg; ETA: %s",
+	if incr > 0 {
+		global.progress.Add(incr)
+	}
+	global.progress.UpdateTitle(fmt.Sprintf("%s %s %d/%d conns, %d OK, %d ERR, %s avg; ETA: %s", version,
 		paused, global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg,
 		(global.session.Duration/time.Duration(global.session.Count)) * time.Duration(len(global.hosts) - global.session.Count),
 	))
@@ -591,8 +598,7 @@ func renderRes (res result, prog cel.Program) {
 	if global.db != nil {
 		global.db.Create(&HostData{SessionID: global.sessid, Time: res.Time, Host: res.Host, Out: res.Out, Failed: res.Cmd != nil})
 	}
-	progressTitle()
-	global.progress.Increment()
+	progressUpdate(1)
 }
 
 func upload (ftp *sftp.Client, upload *Transfer) error {
@@ -854,17 +860,19 @@ func kbdHandler () {
 			panic(err)
 		}
 		if key == keyboard.KeyCtrlC {
-			global.progress.Stop()
-			pterm.Info.Println("Waiting for active connections to complete. Ctrl-C again to quit immediately")
+			if global.stopping {
+				os.Exit(0)
+			}
+			global.stopping = true
+			pterm.Info.Println("Waiting for active connections to complete. Ctrl-c again to quit immediately")
+			global.progress.WithRemoveWhenDone(true).Stop()
 			go global.pool.Stop()
-			for _, key, _ := keyboard.GetKey(); key != keyboard.KeyCtrlC; {}
-			os.Exit(0)
 		} else if key == keyboard.KeySpace && !global.paused {
 			global.paused = true
-			progressTitle()
+			progressUpdate(0)
 		} else if key == keyboard.KeyEnter && global.paused {
 			global.paused = false
-			progressTitle()
+			progressUpdate(0)
 		} else if char == '+' {
 			global.pool.Resize(global.pool.GetSize() + 1)
 		} else if char == '-' {
@@ -892,7 +900,7 @@ func main () {
 
 	go kbdHandler()
 	printHeader()
-	global.progress, err = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle(version).WithMaxWidth(120).Start()
+	global.progress, err = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle(version).WithMaxWidth(0).Start()
 	if err != nil {
 		panic(err)
 	}
