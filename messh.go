@@ -158,15 +158,9 @@ var global struct {
 		ignore	ssh.HostKeyCallback
 	}
 	auth		struct {
-		prompt		sync.Mutex
 		keyring		agent.Agent
 		agent		ssh.AuthMethod
-		ask_pass	ssh.AuthMethod
-		cached_pass	ssh.AuthMethod
-		kbi			ssh.AuthMethod
 		keys		map[string]ssh.AuthMethod
-		interactive	map[string] string
-		pwinput		string
 	}
 }
 
@@ -351,30 +345,6 @@ func initAuth() {
 	} else {
 		global.known_hosts.strict = strict
 	}
-
-	global.auth.cached_pass = ssh.PasswordCallback(func() (string, error) {
-pterm.Error.Println("hi")
-pterm.Debug.Println("cached passwd cb")
-		return global.auth.pwinput, nil
-	})
-	global.auth.ask_pass = ssh.PasswordCallback(func() (string, error) {
-pterm.Error.Println("helwo")
-		global.auth.prompt.Lock()
-		global.auth.pwinput = prompt("Please enter a password as a last auth measure")
-		global.auth.prompt.Unlock()
-		return global.auth.pwinput, nil
-	})
-	global.auth.kbi = ssh.KeyboardInteractive(func(user, inst string, questions []string, echoes []bool) (answers []string, err error) {
-		global.auth.prompt.Lock()
-		for _, q := range questions {
-			if global.auth.interactive[q] == "" {
-				global.auth.interactive[q] = prompt(q)
-			}
-			answers = append(answers, global.auth.interactive[q])
-		}
-		global.auth.prompt.Lock()
-		return
-	})
 }
 
 func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
@@ -423,7 +393,7 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 			}
 		case "keyboard-interactive":
 			if ssh_conf(alias, "KbdInteractiveAuthentication") != "no" {
-				auth = append(auth, global.auth.kbi)
+//				auth = append(auth, global.auth.kbi)
 			}
 		case "password":
 			if ssh_conf(alias, "PasswordAuthentication") == "no" {
@@ -431,8 +401,6 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 			} else if pass := ssh_conf(alias, "Password"); pass != "" {
 				auth = append(auth, ssh.Password(pass))
 			}
-			auth = append(auth, global.auth.ask_pass)
-			auth = append(auth, global.auth.cached_pass)
 		}
 	}
 //spew.Dump(auth)
