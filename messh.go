@@ -161,7 +161,8 @@ var global struct {
 		prompt		sync.Mutex
 		keyring		agent.Agent
 		agent		ssh.AuthMethod
-		password	ssh.AuthMethod
+		ask_pass	ssh.AuthMethod
+		cached_pass	ssh.AuthMethod
 		kbi			ssh.AuthMethod
 		keys		map[string]ssh.AuthMethod
 		interactive	map[string] string
@@ -171,45 +172,43 @@ var global struct {
 
 type Config struct {
 	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
-	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
-	Combined		bool			`short:"C" negatable default:"true" help:"combine stdout and stderr in Out"`
 	Header			string			`short:"H" help:"custom header expression"`
 	Summary			string			`short:"Z" help:"custom summary expression"`
-	Delay			time.Duration	`short:"d" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
+	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
+	Debug			bool			`short:"d" help:"enable debugging messages"`
 	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
-	Timeout			time.Duration	`short:"t" default:"30s" help:"connection timeout"`
+	Delay			time.Duration	`short:"w" aliases:"wait" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
 	Parallelism		uint			`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
+	SSH				struct {
+		Config		[]byte			`short:"C" type:"filecontent" default:"~/.ssh/config" help:"path to SSH config for host/auth configuration"`
+		Opts		map[string]string`short:"O" placeholder:"OPT=VALUE,..." help:"any supported SSH config options, will override config values"`
+	}								`embed prefix:"ssh-"`
 	Hosts			struct {
-		File		string			`short:"f" aliases:"read" required type:"existingfile" help:"hosts file"`
-		Filter		string			`placeholder:"EXPR(host)bool" help:"hosts filter expression"`
-		Order		string			`placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
+		File		string			`short:"f" aliases:"read" group:"hosts" required type:"existingfile" help:"hosts file"`
+		Directive	string			`aliases:"hd" group:"hosts" xor:"hosts" required help:"read hosts from ssh config, looking for the specified directive"`
+		Filter		string			`aliaes:"hf" placeholder:"EXPR(host)bool" help:"hosts filter expression"`
+		Order		string			`aliases:"ho" placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
 	}								`embed prefix:"hosts-"`
-	Print			struct {
-		Template	string			`short:"p" placeholder:"EXPR(host)string" help:"hosts filter expression"`
-		Order		string			`placeholder:"EXPR(a,b)bool" help:"print ordering expression"`
-	}								`embed prefix:"print-"`
 	Log				struct {
 		File		string			`short:"l" placeholder:"EXPR(res)string" help:"string expression to generate log path"`
-		Template	string			`placeholder:"EXPR(res)string" help:"string expression to generate log output"`		
-		Order		string			`placeholder:"EXPR(a,b)bool" help:"log ordering expression"`
+		Template	string			`short:"L" placeholder:"EXPR(res)string" help:"string expression to generate log output"`		
+		Order		string			`aliases:"lo" placeholder:"EXPR(a,b)bool" help:"log ordering expression"`
 	}								`embed prefix:"log-"`
-	Immed			string			`short:"i" aliases:"immediate" placeholder:"EXPR(res)string" help:"expression to print immediately for each result"`
+	Print			struct {
+		Immed		string			`short:"i" aliases:"immediate" placeholder:"EXPR(res)string" help:"expression to print immediately for each result"`
+		Template	string			`short:"p" placeholder:"EXPR(host)string" help:"hosts filter expression"`
+		Order		string			`aliases:"po" placeholder:"EXPR(a,b)bool" help:"print ordering expression"`
+	}								`embed prefix:"print-"`
 	Script			string			`short:"x" type:"existingfile" help:"script to upload and run on each host"`
 	Upload			struct	{
-		From		string			`short:"U" type:"existingfile" placeholder:"LOCAL" help:"local path expression to upload"`
+		From		string			`short:"U" aliases:"uf" type:"existingfile" placeholder:"LOCAL" help:"local path expression to upload"`
 		To			string			`aliases:"ut" placeholder:"REMOTE" help:"remote file path for upload"`
 	}								`embed prefix:"upload-"`
 	Download		struct	{
-		From		string			`short:"D" placeholder:"REMOTE" help:"remote file to download"`
+		From		string			`short:"D" aliases:"df" placeholder:"REMOTE" help:"remote file to download"`
 		To			string			`aliases:"dt" placeholder:"EXPR(res)string" help:"local path expression to download files to"`
 	}								`embed prefix:"download-"`
-	SSH				[]byte			`short:"S" name:"ssh-config" type:"filecontent" default:"~/.ssh/config" help:"path to SSH config for host/auth configuration"`
-	Auth			struct {
-		User			string			`short:"u" default:"root" help:"default user if not specified in hosts"`
-		Password		string			`short:"P" help:"SSH password to use when connecting"`
-		Key				string			`short:"K" placeholder:"KEY[:pass]" help:"SSH key for authentication, has precedence over password"`
-		Agent			bool			`negatable default:"true" help:"allow using SSH agent for authentication"`
-	}								`embed prefix:"auth-"`
+	Interleaved		bool			`short:"I" negatable default:"true" help:"interleave stdout and stderr in a single stream Out"`
 	Command			[]string		`arg optional help:"Command to run"`
 	Version			kong.VersionFlag`short:"V" set:"version=0" help:"display version"`
 }
@@ -240,6 +239,7 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("b",			cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Hosts",		cel.ListType(cel.AnyType)),
 			cel.Variable("Time",		types.DurationType),
+			cel.Variable("Labels",		cel.ListType(cel.StringType)),
 			cel.Variable("Host",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
 			cel.Variable("Err",			cel.StringType),
@@ -253,17 +253,17 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("Exit",		cel.IntType),
 		)
 		if err != nil {
-			panic(err)
+			pterm.Fatal.Println(err)
 		}
 		env = newenv
 	}
 	ast, issues := env.Compile(expr)
 	if issues != nil && issues.Err() != nil {
-		panic(issues.Err())
+		pterm.Fatal.Println(issues.Err())
 	}
 	prg, err := env.Program(ast)
 	if err != nil {
-		panic(err)
+		pterm.Fatal.Println(err)
 	}
 	return prg
 }
@@ -272,34 +272,36 @@ func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string
 	rootmap := make(map[string]any)
 	for _, item := range root {
 		if err := mapstructure.WeakDecode(item, &rootmap); err != nil {
-			panic(err)
+			pterm.Fatal.Println(err)
 		}
 	}
 	for varname, st := range fields {
 		fieldmap := make(map[string]any)
 		if err := mapstructure.WeakDecode(st, &fieldmap); err != nil {
-			panic(err)
+			pterm.Fatal.Println(err)
 		}
 		rootmap[varname] = fieldmap
 	}
 
 	val, _, err := prog.Eval(rootmap)
 	if err != nil {
-		panic(err)
+		pterm.Fatal.Println(err)
 	}
 	if result, err := val.ConvertToNative(want); err == nil {
 		return result
 	}
-	panic("failed to convert expression to wanted type")
+	pterm.Fatal.Println("failed to convert CEL expression to wanted type")
+	return nil
 }
 
 // Get a ssh_config value for the specified host with fallback to global or default values
 func ssh_conf (alias string, key string) string {
-	val, _ := global.ssh_config.Get(alias, key)
-	if val == "" {
-		val = ssh_config.Default(key)
+	if val := global.config.SSH.Opts[key]; val != "" {
+		return val
+	} else if val, _ := global.ssh_config.Get(alias, key); val != "" {
+		return val
 	}
-	return val
+	return ssh_config.Default(key)
 }
 
 func hostkeyCB (hostname string, remote net.Addr, key ssh.PublicKey, replace bool) error {
@@ -350,11 +352,15 @@ func initAuth() {
 		global.known_hosts.strict = strict
 	}
 
-	global.auth.password = ssh.PasswordCallback(func() (string, error) {
+	global.auth.cached_pass = ssh.PasswordCallback(func() (string, error) {
+pterm.Error.Println("hi")
+pterm.Debug.Println("cached passwd cb")
+		return global.auth.pwinput, nil
+	})
+	global.auth.ask_pass = ssh.PasswordCallback(func() (string, error) {
+pterm.Error.Println("helwo")
 		global.auth.prompt.Lock()
-		if global.auth.pwinput == "" {
-			global.auth.pwinput = prompt("Please enter a password as a last auth measure")
-		}
+		global.auth.pwinput = prompt("Please enter a password as a last auth measure")
 		global.auth.prompt.Unlock()
 		return global.auth.pwinput, nil
 	})
@@ -420,11 +426,13 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 				auth = append(auth, global.auth.kbi)
 			}
 		case "password":
-			if pass := ssh_conf(alias, "Password"); pass != "" {
+			if ssh_conf(alias, "PasswordAuthentication") == "no" {
+				break
+			} else if pass := ssh_conf(alias, "Password"); pass != "" {
 				auth = append(auth, ssh.Password(pass))
-			} else if ssh_conf(alias, "PasswordAuthentication") != "no" {
-				auth = append(auth, global.auth.password)
 			}
+			auth = append(auth, global.auth.ask_pass)
+			auth = append(auth, global.auth.cached_pass)
 		}
 	}
 //spew.Dump(auth)
@@ -437,7 +445,7 @@ func hostConfig (line string) host {
 	line = strings.TrimSpace(line)
 	fields := strings.Fields(line)
 	if len(fields) < 1 || len(fields) > 2 {
-		panic("broken record in hosts file")
+		pterm.Fatal.Println("broken record in hosts file")
 	} else if len(fields) > 1 {
 		labels = strings.Split(fields[1], ",")
 	}
@@ -457,10 +465,7 @@ func hostConfig (line string) host {
 		default:
 			known_hosts = global.known_hosts.strict
 	}
-	tout, err := time.ParseDuration(ssh_conf(alias, "ConnectTimeout"))
-	if err != nil {
-		tout = global.config.Timeout
-	}
+	tout, _ := time.ParseDuration(ssh_conf(alias, "ConnectTimeout"))
 	return host{
 		Host: alias,
 		Labels: labels,
@@ -476,18 +481,26 @@ func hostConfig (line string) host {
 	}
 }
 
-func prepareHosts (path string) []host {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
+func prepareHosts () []host {
 	var hosts []host
 	var filter cel.Program
  	if global.config.Hosts.Filter != "" {
 		filter = getCEL(global.config.Hosts.Filter, nil)
 	}
 
-	lines := strings.Split(string(content), "\n")
+	var lines []string
+	if global.config.Hosts.File != "" {
+		content, err := os.ReadFile(global.config.Hosts.File)
+		if err != nil {
+			pterm.Fatal.Println(err)
+		}
+		lines = strings.Split(string(content), "\n")
+	}
+	if global.config.Hosts.Directive != "" {
+		directives, _ := global.ssh_config.GetAll("", global.config.Hosts.Directive)
+		lines = append(lines, directives...)
+	}
+
 	for _, line := range lines {
 		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
 			continue
@@ -651,8 +664,11 @@ func runCmd (client *ssh.Client, job job, res *result) {
 	}
 	defer session.Close()
 	agent.RequestAgentForwarding(session)
-
-	cmd := shellescape.QuoteCommand(job.cmd)
+	cmd := strings.Join(job.cmd, " ")
+	if len(cmd) > 1 {
+		cmd = shellescape.QuoteCommand(job.cmd)
+	}
+//	cmd := shellescape.QuoteCommand(job.cmd)
 	if out := []byte{}; job.combined {
 		out, res.Cmd = session.CombinedOutput(cmd)
 		res.Out = strings.TrimSuffix(string(out), "\n")
@@ -740,9 +756,9 @@ func execJob (host host, job job) result {
 func parallelExec () []result {
 	var results []result
 	var prog cel.Program
-	job := job{cmd: global.config.Command, combined: global.config.Combined, script: global.config.Script}
-	if global.config.Immed != "" {
-		prog = getCEL(global.config.Immed, nil)
+	job := job{cmd: global.config.Command, combined: global.config.Interleaved, script: global.config.Script}
+	if global.config.Print.Immed != "" {
+		prog = getCEL(global.config.Print.Immed, nil)
 	}
 	if global.config.Download.From != "" {
 		if global.config.Download.To == "" {
@@ -806,7 +822,7 @@ func dbOpen () {
 	}
 	db, err := gorm.Open(sqlite.Open(global.config.Database), &gorm.Config{})
 	if err != nil {
-		panic(err)
+		pterm.Fatal.Println(err)
 	}
 
 	// Migrate the schema
@@ -840,7 +856,7 @@ func printHeader () {
 	pterm.Println(pterm.Yellow("* Parallel instances	:"), pterm.Cyan(global.config.Parallelism))
 	pterm.Println(pterm.Yellow("* Delay             	:"), pterm.Cyan(global.config.Delay))
 	pterm.Println(pterm.Yellow("* Command            	:"), pterm.Cyan(global.config.Command))
-	pterm.Println(pterm.Yellow("* Connect timeout       :"), pterm.Cyan(global.config.Timeout))
+	pterm.Println(pterm.Yellow("* Connect timeout       :"), pterm.Cyan(ssh_conf("", "ConnectTimeout")))
 	pterm.DefaultSection.Println("Running command ...")
 }
 
@@ -864,12 +880,12 @@ func printSummary (results []result) {
 
 func kbdHandler () {
 	if err := keyboard.Open(); err != nil {
-		panic(err)
+		pterm.Fatal.Println(err)
 	}
 	for {
 		char, key, err := keyboard.GetKey()
 		if err != nil {
-			panic(err)
+			pterm.Fatal.Println(err)
 		}
 		if key == keyboard.KeyCtrlC {
 			if global.stopping {
@@ -903,21 +919,25 @@ func main () {
 	global.start = time.Now()
 	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, config...))
 
-	ssh_config, err := ssh_config.DecodeBytes(global.config.SSH)
+	if global.config.Debug {
+		pterm.EnableDebugMessages()
+	}
+
+	ssh_config, err := ssh_config.DecodeBytes(global.config.SSH.Config)
 	if err != nil {
-		panic(err)
+		pterm.Fatal.Println(err)
 	}
 	global.ssh_config = ssh_config
 
 	dbOpen()
 	initAuth()
-	global.hosts = prepareHosts(global.config.Hosts.File)
+	global.hosts = prepareHosts()
 
 	go kbdHandler()
 	printHeader()
 	global.progress, err = pterm.DefaultProgressbar.WithTotal(len(global.hosts)).WithTitle(version).WithMaxWidth(0).Start()
 	if err != nil {
-		panic(err)
+		pterm.Fatal.Println(err)
 	}
 	results := parallelExec()
 /*
