@@ -47,7 +47,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.9"
+	version = "MeSSH 0.7.10"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -409,14 +409,17 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 }
 
 func hostConfig (line string) host {
-	var labels []string
+//	var labels []string
 	line = strings.TrimSpace(line)
 	fields := strings.Fields(line)
-	if len(fields) < 1 || len(fields) > 2 {
+	if len(fields) < 1 {
 		pterm.Fatal.Println("broken record in hosts file")
+	}
+/*
 	} else if len(fields) > 1 {
 		labels = strings.Split(fields[1], ",")
-	}
+*/
+	labels := fields[1:]
 	alias := fields[0]
 	addr := ssh_conf(alias, "HostName")
 	if addr == "" {
@@ -508,6 +511,7 @@ func formatRes (res result, prog cel.Program) string {
 		"Host32":	fmt.Sprintf("%32s", res.Host),
 		"Status":	"OK",
 		"Arrow"	:	color.GreenString("->"),
+		"TimeStr":	res.Time,
 	}
 	if res.SSH != nil || res.Cmd != nil {
 		extra["Status"] = "ERR"
@@ -908,6 +912,7 @@ func main () {
 		pterm.Fatal.Println(err)
 	}
 	results := parallelExec()
+	global.progress.Stop()
 /*
 	f, _ := os.Create("messh.prof")
 	if err := pprof.WriteHeapProfile(f); err != nil {
