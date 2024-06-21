@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"bytes"
+	"regexp"
 	"errors"
 	"context"
 	"reflect"
@@ -47,7 +48,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.10"
+	version = "MeSSH 0.7.11"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -409,20 +410,23 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 }
 
 func hostConfig (line string) host {
-//	var labels []string
 	line = strings.TrimSpace(line)
 	fields := strings.Fields(line)
 	if len(fields) < 1 {
 		pterm.Fatal.Println("broken record in hosts file")
 	}
-/*
-	} else if len(fields) > 1 {
-		labels = strings.Split(fields[1], ",")
-*/
 	labels := fields[1:]
 	alias := fields[0]
 	addr := ssh_conf(alias, "HostName")
-	if addr == "" {
+	if addr != "" {
+		re := regexp.MustCompile(`%[%h]`)
+		addr = string(re.ReplaceAllFunc([]byte(addr), func(m []byte) []byte {
+			if string(m) == "%h" {
+				return []byte(alias)
+			}
+			return []byte("%%")
+		}))
+	} else {
 		addr = alias
 	}
 	var known_hosts ssh.HostKeyCallback
