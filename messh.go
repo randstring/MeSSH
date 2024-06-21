@@ -42,13 +42,14 @@ _	"github.com/davecgh/go-spew/spew"
 	"github.com/alessio/shellescape"
 
 	"gorm.io/gorm"
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
+//	"gorm.io/driver/sqlite"
 
 _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.11"
+	version = "MeSSH 0.7.12"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -112,6 +113,9 @@ type HostData struct {
 type SessData struct {
 	gorm.Model
 	Command		string
+	Parallelism	uint
+	Start		time.Time
+	Duration	time.Duration
 }
 
 type HostStats struct {
@@ -147,7 +151,7 @@ var global struct {
 	pool		*gpool.Pool
 	progress	*pterm.ProgressbarPrinter
 	db			*gorm.DB
-	sessid		uint
+	sessdata	SessData
 	paused		bool
 	stopping	bool
 	cancel		context.CancelFunc
@@ -590,7 +594,7 @@ func renderRes (res result, prog cel.Program) {
 		printRes(res, prog)
 	}
 	if global.db != nil {
-		global.db.Create(&HostData{SessionID: global.sessid, Time: res.Time, Host: res.Host, Out: res.Out, Failed: res.Cmd != nil})
+		global.db.Create(&HostData{SessionID: global.sessdata.ID, Time: res.Time, Host: res.Host, Out: res.Out, Failed: res.Cmd != nil})
 	}
 	progressUpdate(1)
 }
@@ -807,10 +811,19 @@ func dbOpen () {
 	// Populate global stats:
 
 
-	sess := SessData{Command: strings.Join(global.config.Command, " ")}
+	sess := SessData{Command: strings.Join(global.config.Command, " "), Start: time.Now(), Parallelism: global.config.Parallelism}
 	db.Create(&sess)
-	global.db = db
-	global.sessid = sess.ID
+	global.db = db.Begin()
+	global.sessdata = sess
+}
+
+func dbClose() {
+	if global.db != nil {
+		pterm.Info.Println(time.Since(global.sessdata.Start))
+		global.sessdata.Duration = time.Since(global.sessdata.Start)
+		global.db.Save(&global.sessdata)
+		global.db.Commit()
+	}
 }
 
 func printHeader () {
@@ -917,6 +930,7 @@ func main () {
 	}
 	results := parallelExec()
 	global.progress.Stop()
+	dbClose()
 /*
 	f, _ := os.Create("messh.prof")
 	if err := pprof.WriteHeapProfile(f); err != nil {
