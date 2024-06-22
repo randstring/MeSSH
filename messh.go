@@ -49,7 +49,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.7.12"
+	version = "MeSSH 0.8.0"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -127,17 +127,19 @@ type HostStats struct {
 	Min			time.Duration
 	Max			time.Duration
 	Last		time.Duration
+	Updated		time.Time
 }
 
 type SessStats struct {
 	Count		int
-	Cmd			string
+	Command		string
 	AvgHosts	float32
 	Avg			time.Duration
 	Min			time.Duration
 	Max			time.Duration
 	Last		time.Duration
 	Period		time.Duration
+	Updated		time.Time
 }
 
 var global struct {
@@ -485,6 +487,7 @@ func prepareHosts () []host {
 			continue
 		}
 		hostent := hostConfig(line)
+		queryHostStats(hostent)
 		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{"Config":global.config}).(bool) {
 			hosts = append(hosts, hostent)
 		}
@@ -810,11 +813,11 @@ func dbOpen () {
 
 	// Populate global stats:
 
-
 	sess := SessData{Command: strings.Join(global.config.Command, " "), Start: time.Now(), Parallelism: global.config.Parallelism}
 	db.Create(&sess)
 	global.db = db.Begin()
 	global.sessdata = sess
+	global.stats = querySessStats()
 }
 
 func dbClose() {
@@ -824,6 +827,31 @@ func dbClose() {
 		global.db.Save(&global.sessdata)
 		global.db.Commit()
 	}
+}
+
+func queryHostStats (host host) {
+	var rec HostData
+	aggr := map[string]any{}
+	global.db.Model(&rec).Select("COUNT(*) Count, SUM(failed) Err, COUNT(*)-SUM(failed) OK, MIN(time) Min, MAX(time) Max, AVG(time) Avg").
+		Where("host = ?", host.Host).First(&aggr)
+	mapstructure.Decode(aggr, &host.Stats)
+	global.db.Model(&rec).Where("host = ?", host.Host).Order("updated_at").First(&rec)
+	host.Stats.Updated = rec.UpdatedAt
+	host.Stats.Last = rec.Time
+}
+
+func querySessStats () SessStats {
+	var rec SessData
+	var stats SessStats
+	aggr := map[string]any{}
+	global.db.Model(&rec).Select("COUNT(*) Count, MIN(duration) Min, MAX(duration) Max, AVG(duration) Avg").First(&aggr)
+	mapstructure.Decode(aggr, &stats)
+	global.db.Model(&rec).Order("updated_at").First(&rec)
+	stats.Updated = rec.UpdatedAt
+	stats.Last = rec.Duration
+	global.db.Model(&rec).Select("command, COUNT(*) cnt").Order("cnt").First(&aggr)
+	stats.Command = aggr["command"].(string)
+	return stats
 }
 
 func printHeader () {
