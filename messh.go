@@ -51,7 +51,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.8.2"
+	version = "MeSSH 0.8.3"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -95,6 +95,7 @@ type result struct {
 type session struct {
 	Ok			int
 	Err			int
+	Done		int
 	Count		int
 	Avg			time.Duration
 	Min			time.Duration
@@ -516,6 +517,7 @@ func prepareHosts () []host {
 		}
 	}
 
+	global.session.Count = len(hosts)
 	if global.config.Hosts.Order != "" {
 		order(global.config.Hosts.Order, hosts)
 	}
@@ -523,7 +525,7 @@ func prepareHosts () []host {
 }
 
 func updateStats (res result) {
-	global.session.Count++
+	global.session.Done++
 	if res.SSH == nil && res.Cmd == nil {
 		global.session.Ok++
 	} else {
@@ -590,7 +592,8 @@ func progressUpdate (incr int) {
 	}
 	var est time.Duration
 	if global.session.Count > 0 {
-		est = (global.session.Duration/time.Duration(global.session.Count)) * time.Duration(len(global.hosts) - global.session.Count)
+//		est = global.session.Avg * time.Duration(global.session.Count - global.session.Done)
+		est = (global.session.Duration/time.Duration(global.session.Done)) * time.Duration(global.session.Count - global.session.Done)
 	}
 	global.progress.UpdateTitle(fmt.Sprintf("%s %s %d/%d conns, %d OK, %d ERR, %s avg; ETA: %s", version,
 		paused, global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg, est,
@@ -675,7 +678,7 @@ func runCmd (client *ssh.Client, job job, res *result) {
 	defer session.Close()
 	agent.RequestAgentForwarding(session)
 	cmd := strings.Join(job.cmd, " ")
-	if len(cmd) > 1 {
+	if len(job.cmd) > 1 {
 		cmd = shellescape.QuoteCommand(job.cmd)
 	}
 //	cmd := shellescape.QuoteCommand(job.cmd)
@@ -843,7 +846,6 @@ func dbOpen () {
 	db.AutoMigrate(&HostData{})
 
 	// Populate global stats:
-
 	sess := SessData{Command: strings.Join(global.config.Command, " "), Start: time.Now(), Parallelism: global.config.Parallelism}
 	db.Create(&sess)
 	global.db = db.Begin()
@@ -853,7 +855,6 @@ func dbOpen () {
 
 func dbClose() {
 	if global.db != nil {
-		pterm.Info.Println(time.Since(global.sessdata.Start))
 		global.sessdata.Duration = time.Since(global.sessdata.Start)
 		global.db.Save(&global.sessdata)
 		global.db.Commit()
