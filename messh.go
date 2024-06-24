@@ -43,6 +43,7 @@ _	"github.com/davecgh/go-spew/spew"
 	"github.com/alessio/shellescape"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"github.com/glebarez/sqlite"
 //	"gorm.io/driver/sqlite"
 
@@ -50,7 +51,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.8.1"
+	version = "MeSSH 0.8.2"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -829,7 +830,11 @@ func dbOpen () {
 	if global.config.Database == "" {
 		return
 	}
-	db, err := gorm.Open(sqlite.Open(global.config.Database), &gorm.Config{})
+	log_level := logger.Silent
+	if global.config.Debug {
+		log_level = logger.Info
+	}
+	db, err := gorm.Open(sqlite.Open(global.config.Database), &gorm.Config{Logger: logger.Default.LogMode(log_level)})
 	if err != nil {
 		pterm.Fatal.Println(err)
 	}
@@ -856,6 +861,9 @@ func dbClose() {
 }
 
 func queryHostStats (host *host) {
+	if global.db == nil {
+		return
+	}
 	var rec HostData
 	aggr := map[string]any{}
 	global.db.Model(&rec).Select("COUNT(*) Count, SUM(failed) Err, COUNT(*)-SUM(failed) OK, MIN(time) Min, MAX(time) Max, AVG(time) Avg").
@@ -870,13 +878,15 @@ func querySessStats () SessStats {
 	var rec SessData
 	var stats SessStats
 	aggr := map[string]any{}
-	global.db.Model(&rec).Select("COUNT(*) Count, MIN(duration) Min, MAX(duration) Max, AVG(duration) Avg").First(&aggr)
-	mapstructure.Decode(aggr, &stats)
-	global.db.Model(&rec).Order("updated_at").First(&rec)
-	stats.Updated = rec.UpdatedAt
-	stats.Last = rec.Duration
-	global.db.Model(&rec).Select("command, COUNT(*) cnt").Order("cnt").First(&aggr)
-	stats.Command = aggr["command"].(string)
+	if global.db != nil {
+		global.db.Model(&rec).Select("COUNT(*) Count, MIN(duration) Min, MAX(duration) Max, AVG(duration) Avg").First(&aggr)
+		mapstructure.Decode(aggr, &stats)
+		global.db.Model(&rec).Order("updated_at").First(&rec)
+		stats.Updated = rec.UpdatedAt
+		stats.Last = rec.Duration
+		global.db.Model(&rec).Select("command, COUNT(*) cnt").Order("cnt").First(&aggr)
+		stats.Command = aggr["command"].(string)
+	}
 	return stats
 }
 
@@ -904,6 +914,11 @@ func printHeader () {
 }
 
 func printSummary (results []result) {
+	if global.config.Summary != "" {
+		pterm.Println(evalCEL(getCEL(global.config.Summary, nil), reflect.TypeOf("string"), []any{}, map[string]any{
+			"Config": global.config, "Session": global.session, "Stats": global.stats,
+		}).(string))
+	}
 	if global.config.Bare {
 		return
 	}
