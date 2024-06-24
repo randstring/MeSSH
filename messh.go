@@ -35,6 +35,7 @@ _	"github.com/davecgh/go-spew/spew"
 	"github.com/jychri/tilde"
 
 	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
 	"github.com/mitchellh/mapstructure"
@@ -49,13 +50,13 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.8.0"
+	version = "MeSSH 0.8.1"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
 
 type host struct {
-	Host	string
+	Alias	string
 	Addr	string
 	Port	string
 	Labels	[]string
@@ -78,7 +79,7 @@ type job struct {
 }
 
 type result struct {
-	Host		string
+	Alias		string
 	Out			string
 	Err			string
 	Exit		int
@@ -86,6 +87,7 @@ type result struct {
 	Cmd			error
 	Upload		error
 	Download	error
+	Host		host
 	Time		time.Duration
 }
 
@@ -223,6 +225,7 @@ func order [T any] (expr string, list []T) {
 			"b": list[j],
 			"Config": global.config,
 			"Session": global.session,
+			"Stats": global.stats,
 		}).(bool)
 	})
 }
@@ -235,23 +238,40 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			cel.Variable("Config",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Session",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("Hist",		cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Host",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("a",			cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("b",			cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("Hosts",		cel.ListType(cel.AnyType)),
-			cel.Variable("Time",		types.DurationType),
 			cel.Variable("Labels",		cel.ListType(cel.StringType)),
-			cel.Variable("Host",		cel.StringType),
+			cel.Variable("Time",		types.DurationType),
+			cel.Variable("Alias",		cel.StringType),
 			cel.Variable("Out",			cel.StringType),
 			cel.Variable("Err",			cel.StringType),
 			cel.Variable("Cmd",			cel.StringType),
 			cel.Variable("SSH",			cel.StringType),
 			cel.Variable("Upload",		cel.StringType),
 			cel.Variable("Download",	cel.StringType),
-			cel.Variable("Host32",		cel.StringType),
 			cel.Variable("Arrow",		cel.StringType),
 			cel.Variable("Status",		cel.StringType),
+			cel.Variable("Addr",		cel.StringType),
+			cel.Variable("Port",		cel.IntType),
 			cel.Variable("Exit",		cel.IntType),
+			cel.Function("ff",			cel.Overload("ff_string_list",
+				[]*cel.Type{cel.StringType, cel.ListType(cel.StringType)},
+				cel.StringType,
+				cel.BinaryBinding(func(left, right ref.Val) ref.Val {
+					format, _ := left.ConvertToNative(reflect.TypeOf(""))
+					lst, _ := right.ConvertToNative(reflect.TypeOf([]any{}))
+					return types.String(fmt.Sprintf(format.(string), lst.([]any)...))
+				}),
+			)),
+			cel.Function("f",			cel.Overload("f_list",
+				[]*cel.Type{cel.ListType(cel.StringType)},
+				cel.StringType,
+				cel.UnaryBinding(func(left ref.Val) ref.Val {
+					lst, _ := left.ConvertToNative(reflect.TypeOf([]any{}))
+					return types.String(strings.TrimSuffix(fmt.Sprintln(lst.([]any)...), "\n"))
+				}),
+			)),
 		)
 		if err != nil {
 			pterm.Fatal.Println(err)
@@ -284,6 +304,7 @@ func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string
 		rootmap[varname] = fieldmap
 	}
 
+//spew.Dump(rootmap["Host"])
 	val, _, err := prog.Eval(rootmap)
 	if err != nil {
 		pterm.Fatal.Println(err)
@@ -410,7 +431,6 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 			}
 		}
 	}
-//spew.Dump(auth)
 
 	return
 }
@@ -448,7 +468,7 @@ func hostConfig (line string) host {
 	}
 	tout, _ := time.ParseDuration(ssh_conf(alias, "ConnectTimeout"))
 	return host{
-		Host: alias,
+		Alias: alias,
 		Labels: labels,
 		Addr: addr,
 		Port: ssh_conf(alias, "Port"),
@@ -487,11 +507,12 @@ func prepareHosts () []host {
 			continue
 		}
 		hostent := hostConfig(line)
-		queryHostStats(hostent)
-		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{"Config":global.config}).(bool) {
+		queryHostStats(&hostent)
+		if filter == nil || evalCEL(filter, reflect.TypeOf(true), []any{hostent}, map[string]any{
+			"Config": global.config, "Session": global.session, "Stats": global.stats,
+		}).(bool) {
 			hosts = append(hosts, hostent)
 		}
-		// fetch from DB
 	}
 
 	if global.config.Hosts.Order != "" {
@@ -519,17 +540,20 @@ func updateStats (res result) {
 
 func formatRes (res result, prog cel.Program) string {
 	extra := map[string]any{
-		"Host32":	fmt.Sprintf("%32s", res.Host),
-		"Status":	"OK",
-		"Arrow"	:	color.GreenString("->"),
-		"TimeStr":	res.Time,
+		"Status"	: "OK",
+		"Arrow"		: color.GreenString("->"),
+		"SSH"		: fmt.Sprintf("%v", res.SSH),
+		"Cmd"		: fmt.Sprintf("%v", res.Cmd),
+		"Upload"	: fmt.Sprintf("%v", res.Upload),
+		"Download"	: fmt.Sprintf("%v", res.Download),
 	}
 	if res.SSH != nil || res.Cmd != nil {
 		extra["Status"] = "ERR"
 		extra["Arrow"] = color.RedString("=:")
 	}
-
-	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{"Config": global.config, "Session": global.session})
+	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{
+		"Config": global.config, "Session": global.session, "Stats": global.stats,
+	})
 	return line.(string)
 }
 
@@ -580,7 +604,9 @@ func prompt (msg string) (string) {
 }
 
 func renderPath (prog cel.Program, res result) string {
-	val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{"Config": global.config, "Session": global.session})
+	val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{
+		"Config": global.config, "Session": global.session, "Stats": global.stats,
+	})
 	path := val.(string)
 	dir := filepath.Dir(path)
 	err := os.MkdirAll(dir, 0750)
@@ -597,7 +623,7 @@ func renderRes (res result, prog cel.Program) {
 		printRes(res, prog)
 	}
 	if global.db != nil {
-		global.db.Create(&HostData{SessionID: global.sessdata.ID, Time: res.Time, Host: res.Host, Out: res.Out, Failed: res.Cmd != nil})
+		global.db.Create(&HostData{SessionID: global.sessdata.ID, Time: res.Time, Host: res.Host.Alias, Out: res.Out, Failed: res.Cmd != nil})
 	}
 	progressUpdate(1)
 }
@@ -673,17 +699,17 @@ func runCmd (client *ssh.Client, job job, res *result) {
 
 func execJob (host host, job job) result {
 	start := time.Now()
-	res := result{Host: host.Host}
+	res := result{Alias: host.Alias, Host: host}
 
 	// SSH client
 	client, err := ssh.Dial("tcp", net.JoinHostPort(host.Addr, host.Port), &host.SSH)
 	if err != nil {
-		pterm.Error.Println(host.Host, err)
+		pterm.Error.Println(host.Alias, err)
 		res.SSH = err
 		return res
 	}
 	defer client.Close()
-	if global.auth.keyring != nil && ssh_conf(host.Host, "ForwardAgent") != "no" {
+	if global.auth.keyring != nil && ssh_conf(host.Alias, "ForwardAgent") != "no" {
 		agent.ForwardToAgent(client, global.auth.keyring)
 	}
 
@@ -829,13 +855,13 @@ func dbClose() {
 	}
 }
 
-func queryHostStats (host host) {
+func queryHostStats (host *host) {
 	var rec HostData
 	aggr := map[string]any{}
 	global.db.Model(&rec).Select("COUNT(*) Count, SUM(failed) Err, COUNT(*)-SUM(failed) OK, MIN(time) Min, MAX(time) Max, AVG(time) Avg").
-		Where("host = ?", host.Host).First(&aggr)
+		Where("host = ?", host.Alias).First(&aggr)
 	mapstructure.Decode(aggr, &host.Stats)
-	global.db.Model(&rec).Where("host = ?", host.Host).Order("updated_at").First(&rec)
+	global.db.Model(&rec).Where("host = ?", host.Alias).Order("updated_at").First(&rec)
 	host.Stats.Updated = rec.UpdatedAt
 	host.Stats.Last = rec.Time
 }
@@ -856,8 +882,8 @@ func querySessStats () SessStats {
 
 func printHeader () {
 	if global.config.Header != "" {
-		pterm.Println(evalCEL(getCEL(global.config.Header, nil), reflect.TypeOf("string"), []any{map[string]any{"Hosts":global.hosts}}, map[string]any{
-			"Config": global.config,
+		pterm.Println(evalCEL(getCEL(global.config.Header, nil), reflect.TypeOf("string"), []any{}, map[string]any{
+			"Config": global.config, "Session": global.session, "Stats": global.stats,
 		}).(string))
 	}
 	if global.config.Bare {
