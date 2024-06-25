@@ -51,7 +51,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.8.5"
+	version = "MeSSH 0.8.6"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -178,7 +178,7 @@ var global struct {
 type Config struct {
 	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
 	Header			string			`short:"H" help:"custom header expression"`
-	Summary			string			`short:"Z" help:"custom summary expression"`
+	Summary			string			`short:"S" help:"custom summary expression"`
 	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
 	Debug			bool			`short:"d" help:"enable debugging messages"`
 	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
@@ -191,7 +191,7 @@ type Config struct {
 	Hosts			struct {
 		File		string			`short:"f" aliases:"read" xor:"hosts" required type:"existingfile" help:"hosts file"`
 		Directive	string			`aliases:"hd" xor:"hosts" required help:"read hosts from ssh config, looking for the specified directive"`
-		Filter		string			`aliaes:"hf" placeholder:"EXPR(host)bool" help:"hosts filter expression"`
+		Filter		string			`aliases:"hf" placeholder:"EXPR(host)bool" help:"hosts filter expression"`
 		Order		string			`aliases:"ho" placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
 	}								`embed prefix:"hosts-"`
 	Log				struct {
