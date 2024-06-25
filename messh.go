@@ -51,7 +51,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.8.3"
+	version = "MeSSH 0.8.4"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -106,7 +106,7 @@ type session struct {
 
 type HostData struct {
 	gorm.Model
-	Host		string
+	Host		string `gorm:"index"`
 	Out			string
 	Failed		bool
 	Time		time.Duration
@@ -478,7 +478,7 @@ func hostConfig (line string) host {
 			User: ssh_conf(alias, "User"),
 			Auth: hostAuthMethods(alias),
 			HostKeyCallback: known_hosts,
-//			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKeyAlgorithms"), ","),
+			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKeyAlgorithms"), ","),
 			Timeout: tout,
 		},
 	}
@@ -837,7 +837,7 @@ func dbOpen () {
 	if global.config.Debug {
 		log_level = logger.Info
 	}
-	db, err := gorm.Open(sqlite.Open(global.config.Database), &gorm.Config{Logger: logger.Default.LogMode(log_level)})
+	db, err := gorm.Open(sqlite.Open(global.config.Database), &gorm.Config{PrepareStmt: true, Logger: logger.Default.LogMode(log_level)})
 	if err != nil {
 		pterm.Fatal.Println(err)
 	}
