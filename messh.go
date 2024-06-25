@@ -51,7 +51,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.8.4"
+	version = "MeSSH 0.8.5"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -189,8 +189,8 @@ type Config struct {
 		Opts		map[string]string`short:"O" placeholder:"OPT=VALUE,..." help:"any supported SSH config options, will override config values"`
 	}								`embed prefix:"ssh-"`
 	Hosts			struct {
-		File		string			`short:"f" aliases:"read" group:"hosts" required type:"existingfile" help:"hosts file"`
-		Directive	string			`aliases:"hd" group:"hosts" xor:"hosts" required help:"read hosts from ssh config, looking for the specified directive"`
+		File		string			`short:"f" aliases:"read" xor:"hosts" required type:"existingfile" help:"hosts file"`
+		Directive	string			`aliases:"hd" xor:"hosts" required help:"read hosts from ssh config, looking for the specified directive"`
 		Filter		string			`aliaes:"hf" placeholder:"EXPR(host)bool" help:"hosts filter expression"`
 		Order		string			`aliases:"ho" placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
 	}								`embed prefix:"hosts-"`
