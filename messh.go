@@ -51,7 +51,7 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.8.6"
+	version = "MeSSH 0.9.1"
 )
 
 var config = []string {"messh.conf", "~/.messh.conf"}
@@ -306,7 +306,6 @@ func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string
 		rootmap[varname] = fieldmap
 	}
 
-//spew.Dump(rootmap["Host"])
 	val, _, err := prog.Eval(rootmap)
 	if err != nil {
 		pterm.Fatal.Println(err)
@@ -646,6 +645,16 @@ func upload (ftp *sftp.Client, upload *Transfer) error {
 	defer remote.Close()
 
 	_, err = io.Copy(remote, local)
+	if err != nil {
+		return err
+	}
+
+	fstat, err := local.Stat()
+	if err != nil {
+		return err
+	}
+
+	err = remote.Chmod(fstat.Mode())
 	return err
 }
 
@@ -798,9 +807,6 @@ func parallelExec () []result {
 		})
 		global.pause.Lock()
 		global.pause.Unlock()
-//		for global.paused {
-//			time.Sleep(100 * time.Millisecond)
-//		}
 	}
 	global.pool.Stop()
 
