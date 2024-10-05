@@ -28,9 +28,9 @@ cd MeSSH
 go build messh.go
 ```
 
-## Screenshots
+## Demo
 
-![App Screenshot](https://asciinema.org/a/rVREA0wWpLGKlRsypHlMkiWTd)
+[![asciicast](https://asciinema.org/a/rVREA0wWpLGKlRsypHlMkiWTd.svg)](https://asciinema.org/a/rVREA0wWpLGKlRsypHlMkiWTd)
 
 
 ## Examples
