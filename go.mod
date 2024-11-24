@@ -1,4 +1,4 @@
-module gosh
+module messh
 
 go 1.19
 
