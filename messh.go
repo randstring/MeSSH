@@ -236,6 +236,7 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 	if env == nil {
 		newenv, err := cel.NewEnv(
 			ext.Math(),
+			ext.Sets(),
 			ext.Strings(),
 			cel.Variable("Config",		cel.MapType(cel.StringType, cel.AnyType)),
 			cel.Variable("Session",		cel.MapType(cel.StringType, cel.AnyType)),
