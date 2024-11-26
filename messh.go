@@ -31,16 +31,16 @@ _	"github.com/davecgh/go-spew/spew"
 	"github.com/alecthomas/kong"
 	"github.com/alecthomas/kong-hcl"
 
+	"github.com/alessio/shellescape"
 	"github.com/thanhpk/randstr"
 	"github.com/jychri/tilde"
+	"github.com/adrg/xdg"
 
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
 	"github.com/mitchellh/mapstructure"
-
-	"github.com/alessio/shellescape"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -51,10 +51,8 @@ _	"runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.9.1"
+	version = "MeSSH 0.9.2"
 )
-
-var config = []string {"messh.conf", "~/.messh.conf"}
 
 type host struct {
 	Alias	string
@@ -983,7 +981,8 @@ func kbdHandler () {
 
 func main () {
 	global.start = time.Now()
-	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, config...))
+	xdg_conf, _ := xdg.ConfigFile("messh/messh.conf")
+	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, []string{xdg_conf, "messh.conf"}...))
 
 	if global.config.Debug {
 		pterm.EnableDebugMessages()
