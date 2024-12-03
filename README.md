@@ -1,6 +1,6 @@
 
 # MeSSH
-[![MeSSH 0.9.1](https://img.shields.io/badge/MeSSH-0.9.1-blue.svg)](https://choosealicense.com/licenses/mit/)
+[![MeSSH 0.9.3](https://img.shields.io/badge/MeSSH-0.9.3-blue.svg)](https://choosealicense.com/licenses/mit/)
 
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
 
