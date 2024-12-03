@@ -1,231 +1,230 @@
 package main
 
 import (
-	"strings"
-	"os"
-	"io"
-	"net"
-	"fmt"
-	"time"
-	"sort"
-	"sync"
 	"bytes"
-	"regexp"
-	"errors"
 	"context"
-	"reflect"
-	"path/filepath"
+	"errors"
+	"fmt"
+	_ "github.com/davecgh/go-spew/spew"
 	"github.com/fatih/color"
-	"github.com/sherifabdlnaby/gpool"
-_	"github.com/davecgh/go-spew/spew"
 	"github.com/kevinburke/ssh_config"
 	"github.com/melbahja/goph"
+	"github.com/pkg/sftp"
+	"github.com/sherifabdlnaby/gpool"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
-	"github.com/pkg/sftp"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
-	"github.com/pterm/pterm"
-	"github.com/pterm/pterm/putils"
-	"github.com/eiannone/keyboard"
 	"github.com/alecthomas/kong"
 	"github.com/alecthomas/kong-hcl"
+	"github.com/eiannone/keyboard"
+	"github.com/pterm/pterm"
+	"github.com/pterm/pterm/putils"
 
-	"github.com/alessio/shellescape"
-	"github.com/thanhpk/randstr"
-	"github.com/jychri/tilde"
 	"github.com/adrg/xdg"
+	"github.com/alessio/shellescape"
+	"github.com/jychri/tilde"
+	"github.com/thanhpk/randstr"
 
+	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
-	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
 	"github.com/mitchellh/mapstructure"
 
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-	"github.com/glebarez/sqlite"
-//	"gorm.io/driver/sqlite"
+	//	"gorm.io/driver/sqlite"
 
-_	"runtime/pprof"
+	_ "runtime/pprof"
 )
 
 const (
-	version = "MeSSH 0.9.2"
+	version = "MeSSH 0.9.3"
 )
 
 type host struct {
-	Alias	string
-	Addr	string
-	Port	string
-	Labels	[]string
-	SSH		ssh.ClientConfig
-	Stats	HostStats
+	Alias  string
+	Addr   string
+	Port   string
+	Labels []string
+	SSH    ssh.ClientConfig
+	Stats  HostStats
 }
 
 type Transfer struct {
-	from	string
-	to		string
-	prog	cel.Program
+	from string
+	to   string
+	prog cel.Program
 }
 
 type job struct {
-	cmd			[]string
-	script		string
-	combined	bool
-	download	*Transfer
-	upload		*Transfer
+	cmd      []string
+	script   string
+	combined bool
+	download *Transfer
+	upload   *Transfer
 }
 
 type result struct {
-	Alias		string
-	Out			string
-	Err			string
-	Exit		int
-	SSH			error
-	Cmd			error
-	Upload		error
-	Download	error
-	Host		host
-	Time		time.Duration
+	Alias    string
+	Out      string
+	Err      string
+	Exit     int
+	SSH      error
+	Cmd      error
+	Upload   error
+	Download error
+	Host     host
+	Time     time.Duration
 }
 
 type session struct {
-	Ok			int
-	Err			int
-	Done		int
-	Count		int
-	Avg			time.Duration
-	Min			time.Duration
-	Max			time.Duration
-	Total		time.Duration
-	Duration	time.Duration
+	Ok       int
+	Err      int
+	Done     int
+	Count    int
+	Avg      time.Duration
+	Min      time.Duration
+	Max      time.Duration
+	Total    time.Duration
+	Duration time.Duration
 }
 
 type HostData struct {
 	gorm.Model
-	Host		string `gorm:"index"`
-	Out			string
-	Failed		bool
-	Time		time.Duration
-	SessionID	uint
-	Session		SessData
+	Host      string `gorm:"index"`
+	Out       string
+	Failed    bool
+	Time      time.Duration
+	SessionID uint
+	Session   SessData
 }
 
 type SessData struct {
 	gorm.Model
-	Command		string
-	Parallelism	uint
-	Start		time.Time
-	Duration	time.Duration
+	Command     string
+	Parallelism uint
+	Start       time.Time
+	Duration    time.Duration
 }
 
 type HostStats struct {
-	Count		int
-	OK			int
-	Err			int
-	Period		float32 // takes part in each N sessions
-	Avg			time.Duration
-	Min			time.Duration
-	Max			time.Duration
-	Last		time.Duration
-	Updated		time.Time
+	Count   int
+	OK      int
+	Err     int
+	Period  float32 // takes part in each N sessions
+	Avg     time.Duration
+	Min     time.Duration
+	Max     time.Duration
+	Last    time.Duration
+	Updated time.Time
 }
 
 type SessStats struct {
-	Count		int
-	Command		string
-	AvgHosts	float32
-	Avg			time.Duration
-	Min			time.Duration
-	Max			time.Duration
-	Last		time.Duration
-	Period		time.Duration
-	Updated		time.Time
+	Count    int
+	Command  string
+	AvgHosts float32
+	Avg      time.Duration
+	Min      time.Duration
+	Max      time.Duration
+	Last     time.Duration
+	Period   time.Duration
+	Updated  time.Time
 }
 
 var global struct {
-	config		Config
-	stats		SessStats
-	session		session
-	hosts		[]host
-	results		[]result
-	start		time.Time
-	ssh_config	*ssh_config.Config
-	pool		*gpool.Pool
-	progress	*pterm.ProgressbarPrinter
-	db			*gorm.DB
-	sessdata	SessData
-	paused		bool
-	stopping	bool
-	cancel		context.CancelFunc
-	pause		sync.Mutex
-	known_hosts	struct {
-		strict	ssh.HostKeyCallback
-		add		ssh.HostKeyCallback
-		replace	ssh.HostKeyCallback
-		ignore	ssh.HostKeyCallback
+	config      Config
+	stats       SessStats
+	session     session
+	hosts       []host
+	results     []result
+	start       time.Time
+	ssh_config  *ssh_config.Config
+	pool        *gpool.Pool
+	progress    *pterm.ProgressbarPrinter
+	db          *gorm.DB
+	sessdata    SessData
+	paused      bool
+	stopping    bool
+	cancel      context.CancelFunc
+	pause       sync.Mutex
+	known_hosts struct {
+		strict  ssh.HostKeyCallback
+		add     ssh.HostKeyCallback
+		replace ssh.HostKeyCallback
+		ignore  ssh.HostKeyCallback
 	}
-	auth		struct {
-		keyring		agent.Agent
-		agent		ssh.AuthMethod
-		keys		map[string]ssh.AuthMethod
+	auth struct {
+		keyring agent.Agent
+		agent   ssh.AuthMethod
+		keys    map[string]ssh.AuthMethod
 	}
 }
 
 type Config struct {
-	Bare			bool			`short:"b" negatable help:"bare output; don't print extra headers or summary"`
-	Header			string			`short:"H" help:"custom header expression"`
-	Summary			string			`short:"S" help:"custom summary expression"`
-	Config			kong.ConfigFlag	`short:"c" help:"load configuration from file"`
-	Debug			bool			`short:"d" help:"enable debugging messages"`
-	Database		string			`short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
-	Delay			time.Duration	`short:"w" aliases:"wait" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
-	Parallelism		uint			`short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
-	SSH				struct {
-		Config		[]byte			`short:"C" type:"filecontent" default:"~/.ssh/config" help:"path to SSH config for host/auth configuration"`
-		Opts		map[string]string`short:"O" placeholder:"OPT=VALUE,..." help:"any supported SSH config options, will override config values"`
-	}								`embed prefix:"ssh-"`
-	Hosts			struct {
-		File		string			`short:"f" aliases:"read" xor:"hosts" required type:"existingfile" help:"hosts file"`
-		Directive	string			`aliases:"hd" xor:"hosts" required help:"read hosts from ssh config, looking for the specified directive"`
-		Filter		string			`aliases:"hf" placeholder:"EXPR(host)bool" help:"hosts filter expression"`
-		Order		string			`aliases:"ho" placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
-	}								`embed prefix:"hosts-"`
-	Log				struct {
-		File		string			`short:"l" placeholder:"EXPR(res)string" help:"string expression to generate log path"`
-		Template	string			`short:"L" placeholder:"EXPR(res)string" help:"string expression to generate log output"`		
-		Order		string			`aliases:"lo" placeholder:"EXPR(a,b)bool" help:"log ordering expression"`
-	}								`embed prefix:"log-"`
-	Print			struct {
-		Immed		string			`short:"i" aliases:"immediate" placeholder:"EXPR(res)string" help:"expression to print immediately for each result"`
-		Template	string			`short:"p" placeholder:"EXPR(host)string" help:"hosts filter expression"`
-		Order		string			`aliases:"po" placeholder:"EXPR(a,b)bool" help:"print ordering expression"`
-	}								`embed prefix:"print-"`
-	Script			string			`short:"x" type:"existingfile" help:"script to upload and run on each host"`
-	Upload			struct	{
-		From		string			`short:"U" aliases:"uf" type:"existingfile" placeholder:"LOCAL" help:"local path expression to upload"`
-		To			string			`aliases:"ut" placeholder:"REMOTE" help:"remote file path for upload"`
-	}								`embed prefix:"upload-"`
-	Download		struct	{
-		From		string			`short:"D" aliases:"df" placeholder:"REMOTE" help:"remote file to download"`
-		To			string			`aliases:"dt" placeholder:"EXPR(res)string" help:"local path expression to download files to"`
-	}								`embed prefix:"download-"`
-	Interleaved		bool			`short:"I" negatable default:"true" help:"interleave stdout and stderr in a single stream Out"`
-	Command			[]string		`arg optional help:"Command to run"`
-	Version			kong.VersionFlag`short:"V" set:"version=0" help:"display version"`
+	Bare        bool            `short:"b" negatable help:"bare output; don't print extra headers or summary"`
+	Header      string          `short:"H" help:"custom header expression"`
+	Summary     string          `short:"S" help:"custom summary expression"`
+	Config      kong.ConfigFlag `short:"c" help:"load configuration from file"`
+	Debug       bool            `short:"d" help:"enable debugging messages"`
+	Database    string          `short:"E" default:"messh.db" help:"persist session data in a SQLite database at the specified location"`
+	Delay       time.Duration   `short:"w" aliases:"wait" default:"10ms" help:"delay each new connection by the specified time, avoiding congestion"`
+	Parallelism uint            `short:"m" aliases:"max" default:1 help:"max number of parallel connections"`
+	SSH         struct {
+		Config []byte            `short:"C" type:"filecontent" default:"~/.ssh/config" help:"path to SSH config for host/auth configuration"`
+		Opts   map[string]string `short:"O" placeholder:"OPT=VALUE,..." help:"any supported SSH config options, will override config values"`
+	} `embed prefix:"ssh-"`
+	Hosts struct {
+		File      string `short:"f" aliases:"read" xor:"hosts" required type:"existingfile" help:"hosts file"`
+		Directive string `aliases:"hd" xor:"hosts" required help:"read hosts from ssh config, looking for the specified directive"`
+		Filter    string `aliases:"hf" placeholder:"EXPR(host)bool" help:"hosts filter expression"`
+		Order     string `aliases:"ho" placeholder:"EXPR(a,b)bool" help:"hosts ordering expression"`
+	} `embed prefix:"hosts-"`
+	Log struct {
+		File     string `short:"l" placeholder:"EXPR(res)string" help:"string expression to generate log path"`
+		Template string `short:"L" placeholder:"EXPR(res)string" help:"string expression to generate log output"`
+		Order    string `aliases:"lo" placeholder:"EXPR(a,b)bool" help:"log ordering expression"`
+	} `embed prefix:"log-"`
+	Print struct {
+		Immed    string `short:"i" aliases:"immediate" placeholder:"EXPR(res)string" help:"expression to print immediately for each result"`
+		Template string `short:"p" placeholder:"EXPR(host)string" help:"hosts filter expression"`
+		Order    string `aliases:"po" placeholder:"EXPR(a,b)bool" help:"print ordering expression"`
+	} `embed prefix:"print-"`
+	Script string `short:"x" type:"existingfile" help:"script to upload and run on each host"`
+	Upload struct {
+		From string `short:"U" aliases:"uf" type:"existingfile" placeholder:"LOCAL" help:"local path expression to upload"`
+		To   string `aliases:"ut" placeholder:"REMOTE" help:"remote file path for upload"`
+	} `embed prefix:"upload-"`
+	Download struct {
+		From string `short:"D" aliases:"df" placeholder:"REMOTE" help:"remote file to download"`
+		To   string `aliases:"dt" placeholder:"EXPR(res)string" help:"local path expression to download files to"`
+	} `embed prefix:"download-"`
+	Interleaved bool             `short:"I" negatable default:"true" help:"interleave stdout and stderr in a single stream Out"`
+	Command     []string         `arg optional help:"Command to run"`
+	Version     kong.VersionFlag `short:"V" set:"version=0" help:"display version"`
 }
 
-
-func order [T any] (expr string, list []T) {
+func order[T any](expr string, list []T) {
 	orderCEL := getCEL(expr, nil)
 	sort.Slice(list, func(i, j int) bool {
 		return evalCEL(orderCEL, reflect.TypeOf(true), []any{}, map[string]any{
-			"a": list[i],
-			"b": list[j],
-			"Config": global.config,
+			"a":       list[i],
+			"b":       list[j],
+			"Config":  global.config,
 			"Session": global.session,
-			"Stats": global.stats,
+			"Stats":   global.stats,
 		}).(bool)
 	})
 }
@@ -236,27 +235,27 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 			ext.Math(),
 			ext.Sets(),
 			ext.Strings(),
-			cel.Variable("Config",		cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("Session",		cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("Stats",		cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("Host",		cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("a",			cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("b",			cel.MapType(cel.StringType, cel.AnyType)),
-			cel.Variable("Labels",		cel.ListType(cel.StringType)),
-			cel.Variable("Time",		types.DurationType),
-			cel.Variable("Alias",		cel.StringType),
-			cel.Variable("Out",			cel.StringType),
-			cel.Variable("Err",			cel.StringType),
-			cel.Variable("Cmd",			cel.StringType),
-			cel.Variable("SSH",			cel.StringType),
-			cel.Variable("Upload",		cel.StringType),
-			cel.Variable("Download",	cel.StringType),
-			cel.Variable("Arrow",		cel.StringType),
-			cel.Variable("Status",		cel.StringType),
-			cel.Variable("Addr",		cel.StringType),
-			cel.Variable("Port",		cel.IntType),
-			cel.Variable("Exit",		cel.IntType),
-			cel.Function("ff",			cel.Overload("ff_string_list",
+			cel.Variable("Config", cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Session", cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Stats", cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Host", cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("a", cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("b", cel.MapType(cel.StringType, cel.AnyType)),
+			cel.Variable("Labels", cel.ListType(cel.StringType)),
+			cel.Variable("Time", types.DurationType),
+			cel.Variable("Alias", cel.StringType),
+			cel.Variable("Out", cel.StringType),
+			cel.Variable("Err", cel.StringType),
+			cel.Variable("Cmd", cel.StringType),
+			cel.Variable("SSH", cel.StringType),
+			cel.Variable("Upload", cel.StringType),
+			cel.Variable("Download", cel.StringType),
+			cel.Variable("Arrow", cel.StringType),
+			cel.Variable("Status", cel.StringType),
+			cel.Variable("Addr", cel.StringType),
+			cel.Variable("Port", cel.IntType),
+			cel.Variable("Exit", cel.IntType),
+			cel.Function("ff", cel.Overload("ff_string_list",
 				[]*cel.Type{cel.StringType, cel.ListType(cel.StringType)},
 				cel.StringType,
 				cel.BinaryBinding(func(left, right ref.Val) ref.Val {
@@ -265,7 +264,7 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 					return types.String(fmt.Sprintf(format.(string), lst.([]any)...))
 				}),
 			)),
-			cel.Function("f",			cel.Overload("f_list",
+			cel.Function("f", cel.Overload("f_list",
 				[]*cel.Type{cel.ListType(cel.StringType)},
 				cel.StringType,
 				cel.UnaryBinding(func(left ref.Val) ref.Val {
@@ -290,7 +289,7 @@ func getCEL(expr string, env *cel.Env) cel.Program {
 	return prg
 }
 
-func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string]any) any {
+func evalCEL(prog cel.Program, want reflect.Type, root []any, fields map[string]any) any {
 	rootmap := make(map[string]any)
 	for _, item := range root {
 		if err := mapstructure.WeakDecode(item, &rootmap); err != nil {
@@ -317,7 +316,7 @@ func evalCEL (prog cel.Program, want reflect.Type, root []any, fields map[string
 }
 
 // Get a ssh_config value for the specified host with fallback to global or default values
-func ssh_conf (alias string, key string) string {
+func ssh_conf(alias string, key string) string {
 	if val := global.config.SSH.Opts[key]; val != "" {
 		return val
 	} else if val, _ := global.ssh_config.Get(alias, key); val != "" {
@@ -326,7 +325,7 @@ func ssh_conf (alias string, key string) string {
 	return ssh_config.Default(key)
 }
 
-func hostkeyCB (hostname string, remote net.Addr, key ssh.PublicKey, replace bool) error {
+func hostkeyCB(hostname string, remote net.Addr, key ssh.PublicKey, replace bool) error {
 	if global.known_hosts.strict == nil {
 		return errors.New("No strict host checking callback.")
 	}
@@ -341,7 +340,7 @@ func hostkeyCB (hostname string, remote net.Addr, key ssh.PublicKey, replace boo
 	}
 
 	err = goph.AddKnownHost(hostname, remote, key, "")
-	if (err != nil) {
+	if err != nil {
 		pterm.Warning.Println(err)
 	}
 
@@ -350,10 +349,10 @@ func hostkeyCB (hostname string, remote net.Addr, key ssh.PublicKey, replace boo
 
 func initAuth() {
 	global.known_hosts.ignore = ssh.InsecureIgnoreHostKey()
-	global.known_hosts.add = func (hostname string, remote net.Addr, key ssh.PublicKey) error {
+	global.known_hosts.add = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return hostkeyCB(hostname, remote, key, false)
 	}
-	global.known_hosts.replace = func (hostname string, remote net.Addr, key ssh.PublicKey) error {
+	global.known_hosts.replace = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return hostkeyCB(hostname, remote, key, true)
 	}
 
@@ -375,7 +374,7 @@ func initAuth() {
 	}
 }
 
-func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
+func hostAuthMethods(alias string) (auth []ssh.AuthMethod) {
 	auth_order := strings.Split(ssh_conf(alias, "PreferredAuthentications"), ",")
 	for _, method := range auth_order {
 		switch method {
@@ -393,10 +392,10 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 						if err != nil {
 							pterm.Warning.Println(err)
 							continue
-						}				
+						}
 						signer, err := ssh.ParsePrivateKey(pk)
 						if _, ok := err.(*ssh.PassphraseMissingError); ok {
-							pass, _ := pterm.DefaultInteractiveTextInput.WithMask("*").Show("Enter a password for ssh key "+file)
+							pass, _ := pterm.DefaultInteractiveTextInput.WithMask("*").Show("Enter a password for ssh key " + file)
 							signer, err = ssh.ParsePrivateKeyWithPassphrase(pk, []byte(pass))
 						}
 						if err == nil {
@@ -421,7 +420,7 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 			}
 		case "keyboard-interactive":
 			if ssh_conf(alias, "KbdInteractiveAuthentication") != "no" {
-//				auth = append(auth, global.auth.kbi)
+				//				auth = append(auth, global.auth.kbi)
 			}
 		case "password":
 			if ssh_conf(alias, "PasswordAuthentication") == "no" {
@@ -435,7 +434,7 @@ func hostAuthMethods (alias string) (auth []ssh.AuthMethod) {
 	return
 }
 
-func hostConfig (line string) host {
+func hostConfig(line string) host {
 	line = strings.TrimSpace(line)
 	fields := strings.Fields(line)
 	if len(fields) < 1 {
@@ -457,35 +456,35 @@ func hostConfig (line string) host {
 	}
 	var known_hosts ssh.HostKeyCallback
 	switch ssh_conf(alias, "StrictHostKeyChecking") {
-		case "accept-new":
-			known_hosts = global.known_hosts.add
-		case "no":
-			known_hosts = global.known_hosts.replace
-		case "off":
-			known_hosts = global.known_hosts.ignore
-		default:
-			known_hosts = global.known_hosts.strict
+	case "accept-new":
+		known_hosts = global.known_hosts.add
+	case "no":
+		known_hosts = global.known_hosts.replace
+	case "off":
+		known_hosts = global.known_hosts.ignore
+	default:
+		known_hosts = global.known_hosts.strict
 	}
 	tout, _ := time.ParseDuration(ssh_conf(alias, "ConnectTimeout"))
 	return host{
-		Alias: alias,
+		Alias:  alias,
 		Labels: labels,
-		Addr: addr,
-		Port: ssh_conf(alias, "Port"),
+		Addr:   addr,
+		Port:   ssh_conf(alias, "Port"),
 		SSH: ssh.ClientConfig{
-			User: ssh_conf(alias, "User"),
-			Auth: hostAuthMethods(alias),
-			HostKeyCallback: known_hosts,
+			User:              ssh_conf(alias, "User"),
+			Auth:              hostAuthMethods(alias),
+			HostKeyCallback:   known_hosts,
 			HostKeyAlgorithms: strings.Split(ssh_conf(alias, "HostKeyAlgorithms"), ","),
-			Timeout: tout,
+			Timeout:           tout,
 		},
 	}
 }
 
-func prepareHosts () []host {
+func prepareHosts() []host {
 	var hosts []host
 	var filter cel.Program
- 	if global.config.Hosts.Filter != "" {
+	if global.config.Hosts.Filter != "" {
 		filter = getCEL(global.config.Hosts.Filter, nil)
 	}
 
@@ -522,7 +521,7 @@ func prepareHosts () []host {
 	return hosts
 }
 
-func updateStats (res result) {
+func updateStats(res result) {
 	global.session.Done++
 	if res.SSH == nil && res.Cmd == nil {
 		global.session.Ok++
@@ -539,26 +538,26 @@ func updateStats (res result) {
 	global.session.Duration = time.Now().Sub(global.start)
 }
 
-func formatRes (res result, prog cel.Program) string {
+func formatRes(res result, prog cel.Program) string {
 	extra := map[string]any{
-		"Status"	: "OK",
-		"Arrow"		: color.GreenString("->"),
-		"SSH"		: fmt.Sprintf("%v", res.SSH),
-		"Cmd"		: fmt.Sprintf("%v", res.Cmd),
-		"Upload"	: fmt.Sprintf("%v", res.Upload),
-		"Download"	: fmt.Sprintf("%v", res.Download),
+		"Status":   "OK",
+		"Arrow":    color.GreenString("->"),
+		"SSH":      fmt.Sprintf("%v", res.SSH),
+		"Cmd":      fmt.Sprintf("%v", res.Cmd),
+		"Upload":   fmt.Sprintf("%v", res.Upload),
+		"Download": fmt.Sprintf("%v", res.Download),
 	}
 	if res.SSH != nil || res.Cmd != nil {
 		extra["Status"] = "ERR"
 		extra["Arrow"] = color.RedString("=:")
 	}
-	line :=	evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{
+	line := evalCEL(prog, reflect.TypeOf("String"), []any{res, extra}, map[string]any{
 		"Config": global.config, "Session": global.session, "Stats": global.stats,
 	})
 	return line.(string)
 }
 
-func printRes (res result, prog cel.Program) {
+func printRes(res result, prog cel.Program) {
 	line := formatRes(res, prog)
 	if line != "" {
 		pterm.Println(line)
@@ -577,7 +576,7 @@ func printToScreen(results []result) {
 	}
 }
 
-func progressUpdate (incr int) {
+func progressUpdate(incr int) {
 	if global.stopping {
 		return
 	}
@@ -590,22 +589,22 @@ func progressUpdate (incr int) {
 	}
 	var est time.Duration
 	if global.session.Count > 0 {
-//		est = global.session.Avg * time.Duration(global.session.Count - global.session.Done)
-		est = (global.session.Duration/time.Duration(global.session.Done)) * time.Duration(global.session.Count - global.session.Done)
+		//		est = global.session.Avg * time.Duration(global.session.Count - global.session.Done)
+		est = (global.session.Duration / time.Duration(global.session.Done)) * time.Duration(global.session.Count-global.session.Done)
 	}
 	global.progress.UpdateTitle(fmt.Sprintf("%s %s %d/%d conns, %d OK, %d ERR, %s avg; ETA: %s", version,
 		paused, global.pool.GetCurrent(), global.pool.GetSize(), global.session.Ok, global.session.Err, global.session.Avg, est,
 	))
 }
 
-func prompt (msg string) (string) {
+func prompt(msg string) string {
 	global.progress.WithRemoveWhenDone(true).Stop()
 	pass, _ := pterm.DefaultInteractiveTextInput.WithMask("*").Show(msg)
 	global.progress.WithRemoveWhenDone(false).Start()
 	return pass
 }
 
-func renderPath (prog cel.Program, res result) string {
+func renderPath(prog cel.Program, res result) string {
 	val := evalCEL(prog, reflect.TypeOf("string"), []any{res}, map[string]any{
 		"Config": global.config, "Session": global.session, "Stats": global.stats,
 	})
@@ -619,7 +618,7 @@ func renderPath (prog cel.Program, res result) string {
 	return path
 }
 
-func renderRes (res result, prog cel.Program) {
+func renderRes(res result, prog cel.Program) {
 	updateStats(res)
 	if prog != nil {
 		printRes(res, prog)
@@ -630,7 +629,7 @@ func renderRes (res result, prog cel.Program) {
 	progressUpdate(1)
 }
 
-func upload (ftp *sftp.Client, upload *Transfer) error {
+func upload(ftp *sftp.Client, upload *Transfer) error {
 	local, err := os.Open(upload.from)
 	if err != nil {
 		return err
@@ -657,7 +656,7 @@ func upload (ftp *sftp.Client, upload *Transfer) error {
 	return err
 }
 
-func download (ftp *sftp.Client, download *Transfer) error {
+func download(ftp *sftp.Client, download *Transfer) error {
 	local, err := os.Create(download.to)
 	if err != nil {
 		return err
@@ -677,7 +676,7 @@ func download (ftp *sftp.Client, download *Transfer) error {
 	return local.Sync()
 }
 
-func runCmd (client *ssh.Client, job job, res *result) {
+func runCmd(client *ssh.Client, job job, res *result) {
 	session, err := client.NewSession()
 	if err != nil {
 		res.SSH = err
@@ -689,7 +688,7 @@ func runCmd (client *ssh.Client, job job, res *result) {
 	if len(job.cmd) > 1 {
 		cmd = shellescape.QuoteCommand(job.cmd)
 	}
-//	cmd := shellescape.QuoteCommand(job.cmd)
+	//	cmd := shellescape.QuoteCommand(job.cmd)
 	if out := []byte{}; job.combined {
 		out, res.Cmd = session.CombinedOutput(cmd)
 		res.Out = strings.TrimSuffix(string(out), "\n")
@@ -703,13 +702,13 @@ func runCmd (client *ssh.Client, job job, res *result) {
 	}
 	if res.Cmd != nil {
 		switch errtype := res.Cmd.(type) {
-			case *ssh.ExitError:
-				res.Exit = errtype.Waitmsg.ExitStatus()
+		case *ssh.ExitError:
+			res.Exit = errtype.Waitmsg.ExitStatus()
 		}
 	}
 }
 
-func execJob (host host, job job) result {
+func execJob(host host, job job) result {
 	start := time.Now()
 	res := result{Alias: host.Alias, Host: host}
 
@@ -774,7 +773,7 @@ func execJob (host host, job job) result {
 	return res
 }
 
-func parallelExec () []result {
+func parallelExec() []result {
 	var results []result
 	var prog cel.Program
 	job := job{cmd: global.config.Command, combined: global.config.Interleaved, script: global.config.Script}
@@ -812,7 +811,7 @@ func parallelExec () []result {
 	return results
 }
 
-func logToFiles (results []result) {
+func logToFiles(results []result) {
 	if global.config.Log.File == "" || global.config.Log.Template == "" {
 		return
 	} else if global.config.Log.Order != "" {
@@ -834,7 +833,7 @@ func logToFiles (results []result) {
 	}
 }
 
-func dbOpen () {
+func dbOpen() {
 	if global.config.Database == "" {
 		return
 	}
@@ -866,7 +865,7 @@ func dbClose() {
 	}
 }
 
-func queryHostStats (host *host) {
+func queryHostStats(host *host) {
 	if global.db == nil {
 		return
 	}
@@ -880,7 +879,7 @@ func queryHostStats (host *host) {
 	host.Stats.Last = rec.Time
 }
 
-func querySessStats () SessStats {
+func querySessStats() SessStats {
 	var rec SessData
 	var stats SessStats
 	aggr := map[string]any{}
@@ -896,7 +895,7 @@ func querySessStats () SessStats {
 	return stats
 }
 
-func printHeader () {
+func printHeader() {
 	if global.config.Header != "" {
 		pterm.Println(evalCEL(getCEL(global.config.Header, nil), reflect.TypeOf("string"), []any{}, map[string]any{
 			"Config": global.config, "Session": global.session, "Stats": global.stats,
@@ -919,7 +918,7 @@ func printHeader () {
 	pterm.DefaultSection.Println("Running command ...")
 }
 
-func printSummary (results []result) {
+func printSummary(results []result) {
 	if global.config.Summary != "" {
 		pterm.Println(evalCEL(getCEL(global.config.Summary, nil), reflect.TypeOf("string"), []any{}, map[string]any{
 			"Config": global.config, "Session": global.session, "Stats": global.stats,
@@ -942,7 +941,7 @@ func printSummary (results []result) {
 	pterm.Println(pterm.Yellow("* Failed                :"), pterm.Cyan(global.session.Err))
 }
 
-func kbdHandler () {
+func kbdHandler() {
 	if err := keyboard.Open(); err != nil {
 		pterm.Fatal.Println(err)
 	}
@@ -979,7 +978,7 @@ func kbdHandler () {
 	}
 }
 
-func main () {
+func main() {
 	global.start = time.Now()
 	xdg_conf, _ := xdg.ConfigFile("messh/messh.conf")
 	kong.Parse(&global.config, kong.Vars{"version": version}, kong.Configuration(konghcl.Loader, []string{xdg_conf, "messh.conf"}...))
@@ -1007,12 +1006,12 @@ func main () {
 	results := parallelExec()
 	global.progress.Stop()
 	dbClose()
-/*
-	f, _ := os.Create("messh.prof")
-	if err := pprof.WriteHeapProfile(f); err != nil {
-		panic(err)
-	}
-*/
+	/*
+		f, _ := os.Create("messh.prof")
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			panic(err)
+		}
+	*/
 	printToScreen(results)
 	logToFiles(results)
 	printSummary(results)
