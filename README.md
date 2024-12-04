@@ -1,9 +1,9 @@
 
-# MeSSH
+# <img src="https://github.com/randstring/MeSSH/raw/main/logo.png">
+
 [![MeSSH 0.9.3](https://img.shields.io/badge/MeSSH-0.9.3-blue.svg)](https://choosealicense.com/licenses/mit/)
 
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
-
 
 High performance, simultaneous command execution on many hosts over SSH.
 
